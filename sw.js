@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v1";
+const CACHE_NAME = "fishintel-shell-v2"; // v2: Voice Reliability Loop (speech.js/app.js/style.css geaendert)
 const SHELL_FILES = [
   "./",
   "./index.html",

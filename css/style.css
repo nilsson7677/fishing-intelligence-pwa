@@ -82,6 +82,7 @@ p { line-height: 1.5; }
 }
 .big-tile .big-tile-icon { font-size: 40px; }
 .big-tile.recording { background: linear-gradient(160deg, #a13030, #6e1e1e); }
+.big-tile.finalizing { background: linear-gradient(160deg, #4a4f57, #33373d); cursor: not-allowed; opacity: 0.85; }
 
 /* ---------- Chips / Badges ---------- */
 .chip { display: inline-block; font-size: 11px; background: var(--panel-border); color: #cfe6f2; padding: 3px 9px; border-radius: 10px; }

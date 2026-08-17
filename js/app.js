@@ -6,7 +6,10 @@ const STATE = {
   view: "copilot",
   species: "mefo",
   water: "luebecker_bucht",
-  voice: { provider: null, listening: false, interim: "", draft: null },
+  // finalizing: true zwischen "Nutzer hat STOP gedrueckt" und "volles Transkript ist da"
+  // (Voice Reliability Loop) - verhindert, dass waehrend dieser kurzen async-Luecke eine neue
+  // Aufnahme gestartet wird und die noch ausstehende Extraktion der vorigen Session ueberschreibt.
+  voice: { provider: null, listening: false, finalizing: false, interim: "", draft: null },
   trip: { active: false, session: null, gpsMode: "off", watchId: null, track: [] },
   renderToken: 0,
 };
@@ -437,9 +440,12 @@ async function viewIntelligence() {
 
   if (STATE.voice.draft) { root.appendChild(buildConfirmCard(STATE.voice.draft)); return root; }
 
-  const micBtn = UI.el("button", { class: `big-tile ${STATE.voice.listening ? "recording" : ""}`, onclick: () => toggleVoiceCapture() }, [
-    UI.el("span", { class: "big-tile-icon" }, STATE.voice.listening ? "⏹" : "🎤"),
-    UI.el("span", {}, STATE.voice.listening ? "Aufnahme läuft — antippen zum Stoppen" : "FANGINFO SPRECHEN"),
+  const micLabel = STATE.voice.finalizing ? "Verarbeite Aufnahme…" : (STATE.voice.listening ? "Aufnahme läuft — antippen zum Stoppen" : "FANGINFO SPRECHEN");
+  const micBtnAttrs = { class: `big-tile ${STATE.voice.listening ? "recording" : ""} ${STATE.voice.finalizing ? "finalizing" : ""}`, onclick: () => toggleVoiceCapture() };
+  if (STATE.voice.finalizing) micBtnAttrs.disabled = "true";
+  const micBtn = UI.el("button", micBtnAttrs, [
+    UI.el("span", { class: "big-tile-icon" }, STATE.voice.finalizing ? "…" : (STATE.voice.listening ? "⏹" : "🎤")),
+    UI.el("span", {}, micLabel),
   ]);
   root.appendChild(micBtn);
   root.appendChild(UI.el("div", { class: "subtext", style: "text-align:center;margin:8px 0 16px;" },
@@ -462,20 +468,33 @@ async function viewIntelligence() {
 }
 
 function toggleVoiceCapture() {
+  // finalizing: STOP wurde bereits gedrueckt, wir warten noch auf das vollstaendige Transkript
+  // der laufenden Session -> weitere Taps ignorieren, statt eine zweite Session zu ueberlappen
+  // (Race Condition aus dem Voice Reliability Loop: "Nutzer drueckt STOP waehrend Restart").
+  if (STATE.voice.finalizing) return;
+
   if (STATE.voice.listening) {
-    STATE.voice.provider?.stop();
     STATE.voice.listening = false;
+    STATE.voice.finalizing = true; // Button zeigt "Verarbeite Aufnahme..." bis onSessionEnd feuert
     renderView();
+    STATE.voice.provider?.stop(); // fuehrt spaeter (async) zu onSessionEnd unten
     return;
   }
   if (!STATE.voice.provider) STATE.voice.provider = new FISpeech.BrowserSpeechToTextProvider();
   if (!STATE.voice.provider.isAvailable()) { UI.toast("Spracherkennung auf diesem Gerät/Browser nicht verfügbar — bitte Text eintippen.", "error"); return; }
-  STATE.voice.listening = true; STATE.voice.interim = "";
+  STATE.voice.listening = true; STATE.voice.finalizing = false; STATE.voice.interim = "";
   renderView();
   STATE.voice.provider.start(
     (interim) => { STATE.voice.interim = interim; if (STATE.view === "intelligence") renderView(); },
-    (finalText) => { STATE.voice.listening = false; runExtraction(finalText); },
-    (errMsg) => { STATE.voice.listening = false; UI.toast(errMsg, "error"); renderView(); }
+    // onSessionEnd: feuert GENAU EINMAL pro Session, mit dem UEBER DIE GESAMTE Aufnahme
+    // akkumulierten Transkript (nicht nur dem ersten Fragment) - siehe speech.js.
+    (fullText) => {
+      STATE.voice.listening = false;
+      STATE.voice.finalizing = false;
+      if (fullText) runExtraction(fullText);
+      else { UI.toast("Keine Sprache erkannt. Bitte nochmal versuchen oder Text eintippen.", "error"); renderView(); }
+    },
+    (errMsg) => { UI.toast(errMsg, "error"); if (STATE.view === "intelligence") renderView(); }
   );
 }
 
