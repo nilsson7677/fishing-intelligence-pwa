@@ -5,7 +5,9 @@
 // intelligence_report traegt zusaetzlich einen inbox_status fuer die Intelligence Inbox (Prio 3).
 
 const DB_NAME = "fishintel_db";
-const DB_VERSION = 1;
+// v2 (Voice Reliability Loop Runde 2, Abschnitt 8): neuer Store "user_vocabulary" fuer
+// persoenliche Sprach-/Ortsnamen-Korrekturen des Nutzers.
+const DB_VERSION = 2;
 
 const STORES = {
   species: "species_id",
@@ -17,6 +19,7 @@ const STORES = {
   observation: "observation_id",
   environmental_snapshot: "snapshot_id",
   enrichment_queue: "queue_id",
+  user_vocabulary: "vocab_id",
 };
 
 let _dbPromise = null;
@@ -43,6 +46,9 @@ function openDb() {
           }
           if (name === "environmental_snapshot") {
             store.createIndex("by_linked", "linked_entity_id", { unique: false });
+          }
+          if (name === "user_vocabulary") {
+            store.createIndex("by_category", "category", { unique: false });
           }
         }
       }

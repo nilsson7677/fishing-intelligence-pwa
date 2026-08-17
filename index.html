@@ -28,16 +28,19 @@
 
 <div id="toast-root" class="toast-root"></div>
 
-<!-- Reihenfolge wichtig: gazetteers/extractor/astro/providers/registry vor enrichment.js;
-     db.js vor allem, was FIDB nutzt. -->
+<!-- Reihenfolge wichtig: db.js vor allem, was FIDB nutzt. meerforelle-model.js VOR gazetteers.js
+     (Voice Reliability Loop Runde 2): gazetteers.js leitet die Spot-Aliase jetzt aus
+     FIMefoModel.SPOT_STATS ab (eine zentrale Quelle statt zweier gepflegter Listen), braucht das
+     Modell also schon beim Laden. gazetteers/extractor/astro/providers/registry weiterhin vor
+     enrichment.js. -->
 <script src="js/db.js"></script>
+<script src="js/meerforelle-model.js"></script>
 <script src="js/gazetteers.js"></script>
 <script src="js/extractor.js"></script>
 <script src="js/astro.js"></script>
 <script src="js/providers.js"></script>
 <script src="js/registry.js"></script>
 <script src="js/enrichment.js"></script>
-<script src="js/meerforelle-model.js"></script>
 <script src="js/seed-data.js"></script>
 <script src="js/speech.js"></script>
 <script src="js/ui.js"></script>

@@ -24,6 +24,15 @@ async function init() {
   const seeded = await FISeed.seedIfEmpty();
   if (seeded) UI.toast("Referenzdaten geladen (Arten/Gewässer/Spots).", "success");
 
+  // USER VOCABULARY (Voice Reliability Loop Runde 2, Abschnitt 8): persoenliche Korrekturen aus
+  // vorherigen Sitzungen VOR der ersten Extraktion in die Gazetteer-Tabellen einmischen, damit
+  // z.B. eine einmal bestaetigte Fuzzy-Korrektur ("Blies Dorf" -> Bliesdorf) ab sofort als
+  // exakter Treffer erkannt wird, nicht erneut nur als unsichere Vermutung.
+  try {
+    const userVocab = await FIDB.getAll("user_vocabulary");
+    if (userVocab.length) GAZ.mergeUserVocabulary(userVocab);
+  } catch (e) { console.warn("User-Vokabular konnte nicht geladen werden:", e); }
+
   if ("serviceWorker" in navigator) {
     try { await navigator.serviceWorker.register("sw.js"); } catch (e) { console.warn("SW-Registrierung fehlgeschlagen:", e); }
   }
@@ -498,6 +507,28 @@ function toggleVoiceCapture() {
   );
 }
 
+// USER VOCABULARY lernen (Abschnitt 8/9): wird aufgerufen, wenn ein Fuzzy-Match (z.B. "Blies
+// Dorf" -> Spot 'bliesdorf') vom Nutzer implizit (SPEICHERN) oder explizit (BEARBEITEN) bestaetigt
+// wurde. Speichert NUR die eine konkrete Zuordnung, keine Heuristik/kein Scoring - bewusst simpel
+// (Abschnitt 8: "noch keine komplexe automatische Lernlogik noetig, aber vorbereiten").
+async function learnSpotAlias(rawToken, spotId, waterId) {
+  if (!rawToken || !spotId) return;
+  const key = rawToken.toLowerCase().trim();
+  if (!key || GAZ.SPOT_ALIASES[key]) return; // schon bekannt (exakt) -> nichts zu lernen
+  try {
+    const existing = await FIDB.getAll("user_vocabulary", "by_category", "spot");
+    if (existing.some((e) => e.alias_text === key)) return; // bereits gelernt
+    const entry = {
+      vocab_id: FIDB.newId("vocab"), category: "spot", alias_text: key,
+      resolved_spot_id: spotId, resolved_water_id: waterId, created_at: FIDB.nowIso(),
+      source: "user_confirmed_fuzzy_match",
+    };
+    await FIDB.put("user_vocabulary", entry);
+    GAZ.mergeUserVocabulary([entry]); // sofort wirksam, nicht erst nach Neuladen der App
+    UI.toast(`Gemerkt: "${rawToken}" bedeutet für dich künftig ${spotId}.`, "success");
+  } catch (e) { console.warn("User-Vokabular konnte nicht gespeichert werden:", e); }
+}
+
 function runExtraction(text) {
   const extractor = new FIExtraction.RuleBasedExtractor();
   const draft = extractor.extract(text, todayUtcMidnight());
@@ -508,7 +539,10 @@ function runExtraction(text) {
 function buildConfirmCard(draft) {
   const card = FIExtraction.confirmCard(draft);
   const wrap = UI.el("div", { class: "panel" });
-  wrap.appendChild(UI.el("div", { class: "panel-label" }, "Original-Transkript"));
+  // Roh-Transkript IMMER zuerst und deutlich sichtbar (Voice Reliability Loop Runde 2, Abschnitt
+  // 2): so laesst sich bei jedem Test sofort trennen, ob ein Fehler von der Spracherkennung
+  // (falscher Text hier) oder von der Extraktion (richtiger Text, falsches Feld unten) kommt.
+  wrap.appendChild(UI.el("div", { class: "panel-label" }, "🎙️ Erkanntes Transkript (Rohtext, vor der Extraktion)"));
   wrap.appendChild(UI.el("p", { style: "font-style:italic;color:var(--text-dim);" }, `"${draft.rawTranscript}"`));
   wrap.appendChild(UI.el("h2", { style: "margin-top:14px;" }, card.headline));
 
@@ -549,6 +583,9 @@ function editDraft(draft) {
   const lengthInput = UI.el("input", { type: "number", value: draft.lengthCm.value ?? "" });
   root.appendChild(UI.el("label", {}, "Zielart (Kürzel: mefo/zander/hecht/barsch)")); root.appendChild(speciesInput);
   root.appendChild(UI.el("label", {}, "Spot/Gewässer")); root.appendChild(spotInput);
+  if (draft.spot.fuzzy) {
+    root.appendChild(UI.el("div", { class: "subtext" }, `📍 ${draft.spot.note}`));
+  }
   root.appendChild(UI.el("label", {}, "Anzahl")); root.appendChild(countInput);
   root.appendChild(UI.el("label", {}, "Länge (cm)")); root.appendChild(lengthInput);
   root.appendChild(UI.el("div", { class: "btn-row" }, [
@@ -558,6 +595,28 @@ function editDraft(draft) {
       draft.fishCount.value = countInput.value !== "" ? parseInt(countInput.value, 10) : null;
       draft.lengthCm.value = lengthInput.value !== "" ? parseFloat(lengthInput.value) : null;
       if (draft.lengthCm.value !== null) { draft.lengthCm.confidence = 1.0; draft.lengthCm.precision = "exact"; draft.lengthCm.note = "manuell korrigiert"; }
+
+      // Spot/Gewaesser aus dem Textfeld aufloesen (Abschnitt 8: vorher wurde dieses Feld beim
+      // Uebernehmen still ignoriert - der Nutzer konnte einen falschen Spot gar nicht korrigieren).
+      // Dieselbe Gazetteer-/Fuzzy-Logik wie bei der Spracherkennung nutzen, nicht neu erfinden.
+      const originalFuzzyToken = draft.spot.fuzzyRawToken; // VOR dem Ueberschreiben merken
+      const typed = spotInput.value.trim();
+      if (typed) {
+        const [waterGuess, spotGuess] = FIExtraction.extractWaterAndSpot(typed.toLowerCase());
+        if (spotGuess.value) {
+          draft.spot = new FIExtraction.FieldGuess(spotGuess.value, 1.0, "exact", "manuell bestätigt/korrigiert");
+          draft.water = new FIExtraction.FieldGuess(waterGuess.value, 1.0, "exact", "aus Spot erschlossen");
+          if (originalFuzzyToken) learnSpotAlias(originalFuzzyToken, spotGuess.value, waterGuess.value);
+        } else if (waterGuess.value) {
+          draft.water = new FIExtraction.FieldGuess(waterGuess.value, 0.9, "exact", "manuell korrigiert");
+          draft.spot = new FIExtraction.FieldGuess(null, 0.0, "unknown", "Kein konkreter Spot, nur Gewässer eingegeben");
+        } else {
+          // Nicht im Gazetteer aufloesbar — als Freitext uebernehmen, ehrlich als unsicher markiert,
+          // statt so zu tun, als waere es ein bekannter Ort (keine Scheingenauigkeit).
+          draft.spot = new FIExtraction.FieldGuess(null, 0.2, "unknown", `Freitext "${typed}" nicht im Spot-Gazetteer gefunden — als Rohtext vermerkt, kein GPS-Punkt erfunden.`);
+          draft.spot.rawFreeText = typed;
+        }
+      }
       renderView();
     } }, "Übernehmen"),
   ]));
@@ -573,6 +632,14 @@ async function saveDraft(draft) {
   // erzwungenem renderView() zurueck auf die Intelligence-Ansicht reissen, selbst wenn er
   // laengst weiternavigiert ist. Der Hintergrund-Task aktualisiert die View nur noch, wenn der
   // Nutzer zufaellig noch/wieder auf der Intelligence-Ansicht ist.
+
+  // Implizite Bestaetigung eines Fuzzy-Spot-Vorschlags: der Nutzer hat die Confirm-Card mit dem
+  // sichtbaren "Fuzzy-Match ... Confidence: mittel"-Hinweis gesehen und direkt SPEICHERN gedrueckt,
+  // statt zu korrigieren -> das werten wir als Bestaetigung und merken uns den Begriff (Abschnitt 8).
+  if (draft.spot.fuzzy && draft.spot.fuzzyRawToken) {
+    learnSpotAlias(draft.spot.fuzzyRawToken, draft.spot.value, draft.water.value);
+  }
+
   const waterId = draft.water.value;
   if (draft.recordType === "observation") {
     await FIDB.put("observation", {
@@ -593,7 +660,7 @@ async function saveDraft(draft) {
     report_date: isoToday(), catch_date: draft.date.value, date_precision: draft.date.precision,
     day_part: draft.dayPart.value, time_precision: draft.dayPart.precision,
     species: draft.species.value, water_id: waterId, spot_id: draft.spot.value,
-    spot_name_raw: !draft.spot.value && draft.spot.note ? draft.spot.note : null,
+    spot_name_raw: !draft.spot.value ? (draft.spot.rawFreeText || draft.spot.note || null) : null,
     gps_lat: null, gps_lon: null, gps_precision: "unknown",
     fish_count: draft.fishCount.value, length_cm: draft.lengthCm.value, length_precision: draft.lengthCm.precision,
     method: null, lure_type: draft.lureType.value, lure_color: draft.lureColor.value, lure_size: draft.lureSize.value,

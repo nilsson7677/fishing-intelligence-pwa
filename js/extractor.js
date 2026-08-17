@@ -36,6 +36,59 @@ function findMultiword(textLower, aliases) {
   return [null, null];
 }
 
+// ---------------------------------------------------------------------------
+// FUZZY ENTITY RESOLUTION (Voice Reliability Loop Runde 2, Abschnitt 5) — NUR als Rueckfallebene,
+// wenn kein exakter Gazetteer-Treffer existiert. Bewusst vorsichtig: kein blindes Auto-Korrigieren,
+// keine entfernten Treffer (Distanz-Schwelle skaliert mit Wortlaenge), reduzierte Confidence, und
+// der Grund ("aehnelt X, Distanz Y") wird immer sichtbar mitgeliefert statt versteckt.
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j - 1], prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+function fuzzyDistanceThreshold(len) {
+  if (len <= 9) return 1;   // kurze/mittlere Namen: nur 1 Tippfehler/Fehlhoerer erlaubt
+  return 2;                 // laengere zusammengesetzte Namen: etwas mehr Toleranz
+}
+
+function findFuzzySpot(textLower) {
+  const tokens = textLower.replace(/[.,;!?]/g, " ").split(/\s+/).filter(Boolean);
+  const candidates = tokens.map((t) => ({ text: t, display: t }));
+  for (let i = 0; i < tokens.length - 1; i++) {
+    candidates.push({ text: `${tokens[i]}${tokens[i + 1]}`, display: `${tokens[i]} ${tokens[i + 1]}` });
+  }
+  let best = null;
+  for (const [aliasName, pair] of Object.entries(GAZ.SPOT_ALIASES)) {
+    const nameCompact = aliasName.replace(/\s+/g, "");
+    if (nameCompact.length < 5) continue; // sehr kurze Spot-Namen nicht fuzzy vergleichen (Fehltrefferrisiko)
+    const threshold = fuzzyDistanceThreshold(nameCompact.length);
+    for (const cand of candidates) {
+      if (cand.text.length < 4) continue;
+      const dist = levenshtein(cand.text, nameCompact);
+      // HINWEIS: dist===0 ist hier bewusst NICHT ausgeschlossen. Das passiert z.B. bei getrennt
+      // gesprochenen/transkribierten Namen ("Blies Dorf" statt "Bliesdorf") — der Kandidat wird
+      // ohne Leerzeichen verglichen und ist dann IDENTISCH mit dem bekannten Spot, obwohl der
+      // Originaltext (mit Leerzeichen) von findMultiword() vorher zu Recht NICHT gefunden wurde.
+      // Genau dieser Fall ist explizit als Fuzzy-Beispiel im Auftrag genannt (Confidence: mittel).
+      if (dist > threshold) continue;
+      if (!best || dist < best.distance) {
+        best = { spotKey: pair[0], waterId: pair[1], name: aliasName, distance: dist, rawToken: cand.display };
+      }
+    }
+  }
+  return best;
+}
+
 function findNumberBefore(textLower, anchorWord, maxLookback = 3) {
   // Sucht rueckwaerts bis zu `maxLookback` Woerter vor dem Ankerwort nach einer Ziffer/einem
   // Zahlwort — NICHT nur das unmittelbar davorstehende Wort, weil dazwischen ein qualitatives
@@ -94,17 +147,30 @@ function extractDayPart(textLower) {
   return new FieldGuess("unknown", 0.0, "unknown", "Keine Tageszeit im Text erkennbar");
 }
 
+// Namensmuster: erlaubt auch Doppelnamen mit Bindestrich ("Kai-Uwe", "Hans-Peter") — vorher wurde
+// bei "Kai-Uwe hatte..." faelschlich nur "Uwe" als Person erkannt (Voice Reliability Loop Runde 2,
+// beim Root-Cause-Check von Testfall A/E aufgefallen).
+const NAME_PATTERN = "[A-ZÄÖÜ][a-zäöüß]+(?:-[A-ZÄÖÜ][a-zäöüß]+)?";
+
 function detectSourceAttribution(textLower, rawText) {
   // Hoerensagen (gehedged) hat Vorrang vor Direktbericht, falls beides zutrifft.
   const hasHearsayMarker = GAZ.HEARSAY_MARKERS.some((m) => textLower.includes(m));
   if (hasHearsayMarker) {
-    const m = rawText.match(/([A-ZÄÖÜ][a-zäöüß]+)\s+(meinte|erzaehlte|erzählte)/);
+    const m = rawText.match(new RegExp(`(${NAME_PATTERN})\\s+(meinte|erzaehlte|erzählte)`));
     return { mode: "hearsay", person: m ? m[1] : null };
   }
-  for (const verb of GAZ.DIRECT_REPORT_VERBS) {
-    const re = new RegExp(`([A-ZÄÖÜ][a-zäöüß]+)\\s+${verb}\\b`);
-    const m = rawText.match(re);
-    if (m) return { mode: "direct_report", person: m[1] };
+  // Direktbericht: das Namensmuster wird NUR am Anfang eines Satzes/Teilsatzes akzeptiert. Grund:
+  // im Deutschen ist JEDES Nomen grossgeschrieben ("Abend hat...", "Wetter hat..."), nicht nur
+  // Eigennamen - ein reines Grossbuchstabe+Verb-Muster wuerde bei haeufigen Verben wie "hat" sonst
+  // z.B. in "Gestern Abend hat Thomas ... gefangen" faelschlich "Abend" als Person erkennen. In der
+  // Praxis steht der Name als Fangberichts-Subjekt praktisch immer am Satzanfang ("Peter hatte...",
+  // "Kai-Uwe hat...").
+  const clauses = rawText.split(/(?<=[.!?;])\s+/).map((c) => c.trim()).filter(Boolean);
+  for (const clause of clauses) {
+    for (const verb of GAZ.DIRECT_REPORT_VERBS) {
+      const m = clause.match(new RegExp(`^(${NAME_PATTERN})\\s+${verb}\\b`));
+      if (m) return { mode: "direct_report", person: m[1] };
+    }
   }
   return { mode: "own", person: null };
 }
@@ -134,6 +200,20 @@ function extractWaterAndSpot(textLower) {
           : "Kein konkreter Spot-Name im Text, nur Gewaesser"),
     ];
   }
+
+  // Kein exakter Treffer fuer Spot ODER Gewaesser — vorsichtiger Fuzzy-Versuch (Abschnitt 5).
+  // Wird NIE automatisch als sicherer Wert uebernommen: reduzierte Confidence, "approximate"
+  // statt "exact", und die Begruendung ist immer sichtbar (siehe unresolvedNotes in extract()).
+  const fuzzy = findFuzzySpot(textLower);
+  if (fuzzy) {
+    const spotGuess = new FieldGuess(fuzzy.spotKey, 0.55, "approximate",
+      `Fuzzy-Match: '${fuzzy.rawToken}' ähnelt bekanntem Spot '${fuzzy.name}' (Levenshtein-Distanz ${fuzzy.distance}) — Confidence: mittel, bitte prüfen/bestätigen.`);
+    spotGuess.fuzzy = true; spotGuess.fuzzyRawToken = fuzzy.rawToken;
+    const waterGuess = new FieldGuess(fuzzy.waterId, 0.5, "approximate",
+      `Gewässer aus vermutetem Spot '${fuzzy.name}' erschlossen (Fuzzy-Match, unsicher).`);
+    return [waterGuess, spotGuess];
+  }
+
   return [new FieldGuess(null, 0.0, "unknown", "Kein Gewaesser erkannt"),
     new FieldGuess(null, 0.0, "unknown", "Kein Spot im Gazetteer gefunden")];
 }
@@ -299,6 +379,7 @@ class RuleBasedExtractor extends InformationExtractionProvider {
       unresolvedNotes.push("Keine Zielart erkannt — Feld bleibt leer statt geraten.");
     }
     if (!spot.value && !water.value) unresolvedNotes.push("Kein Ort erkannt.");
+    if (spot.fuzzy) unresolvedNotes.push(`📍 ${spot.note}`);
 
     return {
       rawTranscript: rawText, recordType, sourceMode: attribution.mode, sourcePerson: attribution.person,
@@ -347,4 +428,9 @@ function confirmCard(draft) {
   };
 }
 
-window.FIExtraction = { RuleBasedExtractor, InformationExtractionProvider, FieldGuess, sourceQualityFor, confirmCard, isoDate, addDays };
+window.FIExtraction = {
+  RuleBasedExtractor, InformationExtractionProvider, FieldGuess, sourceQualityFor, confirmCard, isoDate, addDays,
+  // fuer die manuelle Korrektur (editDraft in app.js) und Tests wiederverwendbar — dieselbe Logik,
+  // die auch die Spracherkennung nutzt, statt sie ein zweites Mal zu implementieren.
+  extractWaterAndSpot, levenshtein,
+};

@@ -18,17 +18,48 @@ const WATER_ALIASES = {
   ostsee: "luebecker_bucht",
 };
 
-// Spot -> [spot_id, water_id]
-const SPOT_ALIASES = {
-  herrenwyk: ["herrenwyk", "trave"],
-  sierksdorf: ["sierksdorf", "luebecker_bucht"],
-  pelzerhaken: ["pelzerhaken", "luebecker_bucht"],
-  groemitz: ["groemitz", "luebecker_bucht"], "grömitz": ["groemitz", "luebecker_bucht"],
-  suessau: ["suessau", "luebecker_bucht"], "süssau": ["suessau", "luebecker_bucht"],
-  weissenhaus: ["weissenhaus", "luebecker_bucht"], "weißenhaus": ["weissenhaus", "luebecker_bucht"],
-  brodten: ["brodten", "luebecker_bucht"],
-  "brodtner ufer": ["brodtner_ufer", "luebecker_bucht"],
-};
+// ---------------------------------------------------------------------------
+// FISHING DOMAIN VOCABULARY — Spot-Aliase (Voice Reliability Loop Runde 2, Abschnitt 3/4)
+// ---------------------------------------------------------------------------
+// Vorher: eine von Hand gepflegte SPOT_ALIASES-Liste, die nur 8 von 14 bekannten Spots aus dem
+// Meerforellen-Modell abdeckte ("Bliesdorf" fehlte komplett - kein Einzelfall, sondern ein
+// systematischer Rueckstand). Jetzt: SPOT_ALIASES wird aus FIMefoModel.SPOT_STATS abgeleitet -
+// EINE zentrale Quelle statt zweier separat gepflegter Listen. Jeder neue/kalibrierte Spot taucht
+// automatisch auch im Sprach-Vokabular auf, ohne dass jemand eine zweite Liste nachpflegen muss
+// (Abschnitt 4: "wie skalieren wir bei kuenftigen Namen" — Antwort hier: gar nicht mehr manuell).
+// Nur Spots OHNE Fangbuch-Kalibrierung (z.B. neue Trave-Spots wie Herrenwyk, n=0) bleiben als
+// expliziter Zusatzeintrag noetig.
+
+function toAsciiDe(s) {
+  // 'ö' -> 'oe' usw. — deckt automatisch beide gaengigen Schreib-/Sprechweisen ab (Umlaut und
+  // dessen Transliteration), ohne dass jede Variante von Hand eingetragen werden muss.
+  return s.replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss");
+}
+
+function buildSpotAliases() {
+  const aliases = {
+    // Spots, die (noch) nicht im kalibrierten Meerforellen-Modell stehen (z.B. neue Trave-Spots
+    // ohne historische Fangbuch-Basis) - bewusst weiterhin manuell, da hier keine automatische
+    // Quelle existiert.
+    herrenwyk: ["herrenwyk", "trave"],
+  };
+  const stats = (window.FIMefoModel && window.FIMefoModel.SPOT_STATS) || {};
+  for (const [spotKey, info] of Object.entries(stats)) {
+    if (spotKey === "ostsee_allgemein") continue; // Sammel-Bucket, kein echter benannter Spot
+    const nameLower = info.name.toLowerCase();
+    aliases[nameLower] = [spotKey, "luebecker_bucht"];
+    const ascii = toAsciiDe(nameLower);
+    if (ascii !== nameLower) aliases[ascii] = [spotKey, "luebecker_bucht"];
+  }
+  return aliases;
+}
+
+// Spot -> [spot_id, water_id]. SPOT_CANONICAL_NAMES (spot_id -> gesprochener Name) wird fuer den
+// Fuzzy-Resolver in extractor.js gebraucht (Abschnitt 5).
+const SPOT_ALIASES = buildSpotAliases();
+const SPOT_CANONICAL_NAMES = Object.fromEntries(
+  Object.entries(SPOT_ALIASES).map(([alias, [spotKey]]) => [spotKey, alias])
+);
 
 const LURE_ALIASES = {
   gummifisch: "Gummifisch", gummis: "Gummifisch", gummi: "Gummifisch",
@@ -87,11 +118,42 @@ const OBSERVATION_MARKERS = [
 // (nicht gehedged, aber trotzdem ueber eine dritte Person) sind bewusst unterschieden — siehe
 // extractor.js classify().
 const HEARSAY_MARKERS = ["meinte", "haette", "hätte", "soll", "sollen", "erzaehlte", "erzählte"];
-const DIRECT_REPORT_VERBS = ["hatte", "fing", "fangte"];
+// "hat" ergaenzt (Voice Reliability Loop Runde 2, Testfall A: "Kai-Uwe HAT gestern ... gefangen"
+// ist im Alltag mindestens so gebraeuchlich wie "hatte") — siehe extractor.js
+// detectSourceAttribution() fuer die Absicherung gegen Fehltreffer durch deutsche
+// Grossschreibung (jedes Nomen ist grossgeschrieben, nicht nur Namen).
+const DIRECT_REPORT_VERBS = ["hatte", "hat", "fing", "fangte"];
+
+// ---------------------------------------------------------------------------
+// USER VOCABULARY (Abschnitt 8/9) — persoenliche Korrekturen/Aliase, die der Nutzer bestaetigt
+// oder eingegeben hat (z.B. "Blies Dorf" -> Spot 'bliesdorf'), werden hier zur Laufzeit UEBER die
+// Basis-Vokabulare gelegt. Persistiert wird in IndexedDB (Store "user_vocabulary", siehe db.js) -
+// diese Funktion mutiert nur die bereits im Speicher stehenden Alias-Tabellen, damit
+// findMultiword() sie ab sofort ohne weitere Aenderung mitfindet (gleiche Objekt-Referenz).
+// Bewusst noch KEINE automatische Lernlogik (kein Scoring/Bestaetigungszaehler) - nur "Nutzer hat
+// explizit bestaetigt/korrigiert -> ab jetzt bekannt". Das ist laut Auftrag als MVP ausreichend.
+function mergeUserVocabulary(entries) {
+  for (const e of entries || []) {
+    if (!e || !e.category || !e.alias_text) continue;
+    const key = e.alias_text.toLowerCase().trim();
+    if (!key) continue;
+    if (e.category === "spot" && e.resolved_spot_id) {
+      SPOT_ALIASES[key] = [e.resolved_spot_id, e.resolved_water_id || "luebecker_bucht"];
+    } else if (e.category === "water" && e.resolved_water_id) {
+      WATER_ALIASES[key] = e.resolved_water_id;
+    } else if (e.category === "species" && e.resolved_value) {
+      SPECIES_ALIASES[key] = e.resolved_value;
+    } else if (e.category === "lure" && e.resolved_value) {
+      LURE_ALIASES[key] = e.resolved_value;
+    } else if (e.category === "lure_color" && e.resolved_value) {
+      LURE_COLOR_ALIASES[key] = e.resolved_value;
+    }
+  }
+}
 
 window.GAZ = {
-  SPECIES_ALIASES, WATER_ALIASES, SPOT_ALIASES, LURE_ALIASES, LURE_COLOR_ALIASES,
+  SPECIES_ALIASES, WATER_ALIASES, SPOT_ALIASES, SPOT_CANONICAL_NAMES, LURE_ALIASES, LURE_COLOR_ALIASES,
   GERMAN_NUMBER_WORDS, BLANK_TRIP_MARKERS, CONTACT_BLANK_MARKERS,
   QUALITATIVE_QUANTITY_MARKERS, UNKNOWN_QUANTITY_MARKERS, MONTH_NAMES, DAYPART_MARKERS,
-  OBSERVATION_MARKERS, HEARSAY_MARKERS, DIRECT_REPORT_VERBS,
+  OBSERVATION_MARKERS, HEARSAY_MARKERS, DIRECT_REPORT_VERBS, toAsciiDe, mergeUserVocabulary,
 };
