@@ -57,8 +57,16 @@ function levenshtein(a, b) {
 }
 
 function fuzzyDistanceThreshold(len) {
-  if (len <= 9) return 1;   // kurze/mittlere Namen: nur 1 Tippfehler/Fehlhoerer erlaubt
-  return 2;                 // laengere zusammengesetzte Namen: etwas mehr Toleranz
+  // Runde 6 (echter Android-Testfall "Bliesdorf" -> "Diesdorf", Levenshtein-Distanz 2 bei 9
+  // Zeichen): die alte Schwelle (<=9 nur 1 Fehler erlaubt) war fuer genau diesen realen STT-Fehler
+  // zu streng und haette ihn NICHT gefunden. Gegen ein breites Set realistischer Fehlhoerer UND
+  // unverwandter Wörter (echte Nachbarorte wie "Travemünde"/"Niendorf"/"Scharbeutz") geprueft:
+  // Namen <=6 Zeichen bleiben bei 1 (kurze Namen sind sowieso schon vorher per <5-Skip grossteils
+  // ausgeschlossen, siehe findFuzzySpot), 7-11 Zeichen erlauben 2, sehr lange zusammengesetzte
+  // Namen (>=12) erlauben 3 — jeweils klar getrennt vom naechstbesten, nicht verwandten Kandidaten.
+  if (len <= 6) return 1;
+  if (len <= 11) return 2;
+  return 3;
 }
 
 function findFuzzySpot(textLower) {
@@ -82,7 +90,11 @@ function findFuzzySpot(textLower) {
       // Genau dieser Fall ist explizit als Fuzzy-Beispiel im Auftrag genannt (Confidence: mittel).
       if (dist > threshold) continue;
       if (!best || dist < best.distance) {
-        best = { spotKey: pair[0], waterId: pair[1], name: aliasName, distance: dist, rawToken: cand.display };
+        // Anzeigename (huebsch grossgeschrieben, z.B. "Bliesdorf") statt des klein geschriebenen
+        // Alias-Schluessels fuer die in der Confirm Card sichtbare Begruendung (Runde 6) — der
+        // interne spotKey/waterId bleibt davon unberuehrt (weiterhin die kleingeschriebene ID).
+        const displayName = (window.GAZ && GAZ.SPOT_CANONICAL_NAMES && GAZ.SPOT_CANONICAL_NAMES[pair[0]]) || aliasName;
+        best = { spotKey: pair[0], waterId: pair[1], name: displayName, distance: dist, rawToken: cand.display };
       }
     }
   }
@@ -150,14 +162,30 @@ function extractDayPart(textLower) {
 // Namensmuster: erlaubt auch Doppelnamen mit Bindestrich ("Kai-Uwe", "Hans-Peter") — vorher wurde
 // bei "Kai-Uwe hatte..." faelschlich nur "Uwe" als Person erkannt (Voice Reliability Loop Runde 2,
 // beim Root-Cause-Check von Testfall A/E aufgefallen).
-const NAME_PATTERN = "[A-ZÄÖÜ][a-zäöüß]+(?:-[A-ZÄÖÜ][a-zäöüß]+)?";
+//
+// Runde 6 (echter Android-Testfall): das Roh-Transkript liefert Bindestrich-Namen NICHT zuverlaessig
+// im zweiten Teil grossgeschrieben — "Kai-Uwe" kam real als "Kai-uwe" an (kleines 'u'). Der zweite
+// Teil nach dem Bindestrich darf daher WAHLWEISE gross- oder kleingeschrieben beginnen; der ERSTE
+// Buchstabe des gesamten Tokens muss weiterhin grossgeschrieben sein (zusammen mit der bereits
+// bestehenden Satzanfangs-Ankerung in detectSourceAttribution() das, was Namen von normalen,
+// grossgeschriebenen deutschen Nomen unterscheidet). Das ist eine GENERISCHE Lockerung des Musters,
+// nicht an den Namen "Kai-Uwe" gebunden — jeder Bindestrich-Name mit dieser STT-Eigenheit profitiert.
+const NAME_PATTERN = "[A-ZÄÖÜ][a-zäöüß]+(?:-[A-Za-zÄÖÜäöüß]+)?";
+
+// Normalisiert die Gross-/Kleinschreibung eines erkannten Namens fuer die ANZEIGE ("Kai-uwe" ->
+// "Kai-Uwe") — noetig, weil das Roh-Transkript den Bindestrich-Teil nicht zuverlaessig grossschreibt
+// (Runde 6, siehe NAME_PATTERN oben). Rein kosmetisch fuer die Confirm Card; die Erkennung selbst
+// haengt nicht von dieser Normalisierung ab.
+function normalizePersonName(name) {
+  return name.split("-").map((part) => part ? part[0].toUpperCase() + part.slice(1) : part).join("-");
+}
 
 function detectSourceAttribution(textLower, rawText) {
   // Hoerensagen (gehedged) hat Vorrang vor Direktbericht, falls beides zutrifft.
   const hasHearsayMarker = GAZ.HEARSAY_MARKERS.some((m) => textLower.includes(m));
   if (hasHearsayMarker) {
     const m = rawText.match(new RegExp(`(${NAME_PATTERN})\\s+(meinte|erzaehlte|erzählte)`));
-    return { mode: "hearsay", person: m ? m[1] : null };
+    return { mode: "hearsay", person: m ? normalizePersonName(m[1]) : null };
   }
   // Direktbericht: das Namensmuster wird NUR am Anfang eines Satzes/Teilsatzes akzeptiert. Grund:
   // im Deutschen ist JEDES Nomen grossgeschrieben ("Abend hat...", "Wetter hat..."), nicht nur
@@ -169,15 +197,24 @@ function detectSourceAttribution(textLower, rawText) {
   for (const clause of clauses) {
     for (const verb of GAZ.DIRECT_REPORT_VERBS) {
       const m = clause.match(new RegExp(`^(${NAME_PATTERN})\\s+${verb}\\b`));
-      if (m) return { mode: "direct_report", person: m[1] };
+      if (m) return { mode: "direct_report", person: normalizePersonName(m[1]) };
     }
   }
   return { mode: "own", person: null };
 }
 
+// Haengt einen huebschen Anzeigenamen (nur fuer die Confirm Card, Runde 6) an eine FieldGuess an,
+// OHNE deren .value (den weiterhin ueberall in DB/Filtern genutzten internen Schluessel) zu
+// veraendern. displayName faellt auf .value zurueck, wenn kein Eintrag im jeweiligen
+// CANONICAL_NAMES-Vokabular existiert (z.B. bei kuenftigen, noch nicht ergaenzten Begriffen).
+function withDisplayName(guess, displayName) {
+  guess.displayName = displayName || guess.value;
+  return guess;
+}
+
 function extractSpecies(textLower) {
   const [val, key] = findMultiword(textLower, GAZ.SPECIES_ALIASES);
-  if (val) return new FieldGuess(val, 0.9, "exact", `Gazetteer-Treffer '${key}'`);
+  if (val) return withDisplayName(new FieldGuess(val, 0.9, "exact", `Gazetteer-Treffer '${key}'`), GAZ.SPECIES_CANONICAL_NAMES[val]);
   return new FieldGuess(null, 0.0, "unknown", "Keine Zielart im Text erkannt");
 }
 
@@ -186,14 +223,14 @@ function extractWaterAndSpot(textLower) {
   if (spotVal) {
     const [spotId, waterId] = spotVal;
     return [
-      new FieldGuess(waterId, 0.85, "exact", `Gewaesser aus Spot '${spotKey}' erschlossen`),
-      new FieldGuess(spotId, 0.9, "exact", `Gazetteer-Treffer '${spotKey}'`),
+      withDisplayName(new FieldGuess(waterId, 0.85, "exact", `Gewaesser aus Spot '${spotKey}' erschlossen`), GAZ.WATER_CANONICAL_NAMES[waterId]),
+      withDisplayName(new FieldGuess(spotId, 0.9, "exact", `Gazetteer-Treffer '${spotKey}'`), GAZ.SPOT_CANONICAL_NAMES[spotId]),
     ];
   }
   const [waterVal, waterKey] = findMultiword(textLower, GAZ.WATER_ALIASES);
   if (waterVal) {
     return [
-      new FieldGuess(waterVal, 0.85, "exact", `Gazetteer-Treffer '${waterKey}'`),
+      withDisplayName(new FieldGuess(waterVal, 0.85, "exact", `Gazetteer-Treffer '${waterKey}'`), GAZ.WATER_CANONICAL_NAMES[waterVal]),
       new FieldGuess(null, 0.0, "unknown",
         /hinten|irgendwo|ungefaehr|ungefähr/.test(textLower)
           ? "Nur vage Ortsangabe im Text ('hinten an ...' o.ae.) — KEIN erfundener Spot/GPS-Punkt"
@@ -206,11 +243,16 @@ function extractWaterAndSpot(textLower) {
   // statt "exact", und die Begruendung ist immer sichtbar (siehe unresolvedNotes in extract()).
   const fuzzy = findFuzzySpot(textLower);
   if (fuzzy) {
+    // fuzzy.name ist bereits der huebsche Anzeigename (siehe findFuzzySpot oben, Runde 6) — direkt
+    // auch als displayName der FieldGuess nutzen, damit die Confirm Card "Bliesdorf" zeigt, nicht
+    // die interne, kleingeschriebene spotKey-ID.
     const spotGuess = new FieldGuess(fuzzy.spotKey, 0.55, "approximate",
       `Fuzzy-Match: '${fuzzy.rawToken}' ähnelt bekanntem Spot '${fuzzy.name}' (Levenshtein-Distanz ${fuzzy.distance}) — Confidence: mittel, bitte prüfen/bestätigen.`);
     spotGuess.fuzzy = true; spotGuess.fuzzyRawToken = fuzzy.rawToken;
+    withDisplayName(spotGuess, fuzzy.name);
     const waterGuess = new FieldGuess(fuzzy.waterId, 0.5, "approximate",
       `Gewässer aus vermutetem Spot '${fuzzy.name}' erschlossen (Fuzzy-Match, unsicher).`);
+    withDisplayName(waterGuess, GAZ.WATER_CANONICAL_NAMES[fuzzy.waterId]);
     return [waterGuess, spotGuess];
   }
 
@@ -400,24 +442,30 @@ function sourceQualityFor(draft) {
 }
 
 function confirmCard(draft) {
+  // Anzeigenamen (Fishing Domain Vocabulary, Runde 6) statt interner Schluessel/IDs fuer die
+  // Ueberschrift und die Ort-Zeile — "Meerforelle @ Bliesdorf" statt "mefo @ bliesdorf". Faellt auf
+  // den internen Wert zurueck, falls (noch) kein Anzeigename hinterlegt ist (z.B. neue Begriffe).
+  const speciesDisplay = draft.species.displayName || draft.species.value;
+  const spotDisplay = draft.spot.displayName || draft.spot.value;
+  const waterDisplay = draft.water.displayName || draft.water.value;
   const parts = [];
   if (draft.fishCount.value !== null && draft.fishCount.value !== undefined) {
-    parts.push(`${draft.fishCount.value}x ${draft.species.value || "?"}`);
-  } else if (draft.species.value) {
-    parts.push(draft.species.value);
+    parts.push(`${draft.fishCount.value}x ${speciesDisplay || "?"}`);
+  } else if (speciesDisplay) {
+    parts.push(speciesDisplay);
   } else if (draft.recordType === "observation") {
     parts.push("Beobachtung");
   } else if (draft.recordType === "trip_blank") {
     parts.push("Nullrunde");
   }
-  if (draft.spot.value) parts.push(`@ ${draft.spot.value}`);
-  else if (draft.water.value) parts.push(`@ ${draft.water.value}`);
+  if (spotDisplay) parts.push(`@ ${spotDisplay}`);
+  else if (waterDisplay) parts.push(`@ ${waterDisplay}`);
   const headline = parts.length ? parts.join(" ") : "Eintrag (unklar, bitte pruefen)";
   const lowConfFields = ["species", "water", "spot", "date", "fishCount", "lengthCm"]
     .filter((f) => draft[f].value !== null && draft[f].value !== undefined && draft[f].confidence < 0.6);
   return {
     headline, datum: draft.date.value, tageszeit: draft.dayPart.value,
-    spot: draft.spot.value, water: draft.water.value, anzahl: draft.fishCount.value,
+    spot: draft.spot.value, spotDisplay, water: draft.water.value, waterDisplay, anzahl: draft.fishCount.value,
     recordType: draft.recordType,
     quelle: { hearsay_report: "Hörensagen", direct_report: "Direktbericht", observation: "Eigene Beobachtung" }[draft.recordType] || "Eigene Meldung",
     von: draft.sourcePerson,

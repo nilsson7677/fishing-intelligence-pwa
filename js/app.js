@@ -576,7 +576,10 @@ function buildConfirmCard(draft) {
   const rows = [
     ["📅 Datum", draft.date.value ? UI.fmtDate(draft.date.value) : "unbekannt", draft.date],
     ["🕐 Tageszeit", UI.fmtDayPart(draft.dayPart.value), draft.dayPart],
-    ["📍 Ort", draft.spot.value || draft.water.value || "unbekannt", draft.spot.value ? draft.spot : draft.water],
+    // Anzeigename statt interner ID (Fishing Domain Vocabulary, Runde 6): "Bliesdorf" statt
+    // "bliesdorf" — displayName faellt auf .value zurueck, falls (noch) kein huebscher Name
+    // hinterlegt ist (siehe withDisplayName() in extractor.js).
+    ["📍 Ort", (draft.spot.value ? draft.spot.displayName : draft.water.displayName) || draft.spot.value || draft.water.value || "unbekannt", draft.spot.value ? draft.spot : draft.water],
     ["🐟 Anzahl", draft.fishCount.value ?? "unbekannt/nicht quantifiziert", draft.fishCount],
     ["📏 Größe", draft.lengthCm.value ? `ca. ${draft.lengthCm.value} cm` : "keine Angabe", draft.lengthCm],
     ["🎣 Köder", [draft.lureType.value, draft.lureColor.value, draft.lureSize.value].filter(Boolean).join(" · ") || "keine Angabe", draft.lureType],

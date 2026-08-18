@@ -10,6 +10,27 @@ const SPECIES_ALIASES = {
   meerforelle: "mefo", meerforellen: "mefo", mefo: "mefo", mefos: "mefo",
 };
 
+// ---------------------------------------------------------------------------
+// FISHING DOMAIN VOCABULARY (Voice Reliability Loop Runde 6) — zentrale, erweiterbare Struktur fuer
+// Anglersprache, statt ueber den Code verstreuter Sonderfaelle. Zwei getrennte Schichten pro Begriff:
+//   1. ALIASES  (z.B. SPECIES_ALIASES oben): gesprochene/geschriebene Variante -> INTERNER SCHLUESSEL
+//      ("mefo") — dieser Schluessel bleibt bewusst UNVERAENDERT und wird in DB/Filtern/Modell
+//      ueberall verwendet (Abschnitt: STATE.species==="mefo", intelligence_report.species, etc.) —
+//      ihn umzubenennen wuerde bestehende Filter/Speicherungen brechen.
+//   2. CANONICAL_NAMES (hier neu): interner Schluessel -> huebscher ANZEIGENAME ("Meerforelle") —
+//      NUR fuer die Darstellung in der Confirm Card genutzt, nie fuer Speicherung/Filterung.
+// "Mefo/Mefos -> Meerforelle" ist der von Runde 6 geforderte erste Eintrag. Die Struktur ist bewusst
+// so gebaut, dass weitere reale Anglerbegriffe spaeter einfach ergaenzt werden koennen, OHNE
+// Extraktionslogik anfassen zu muessen, z.B. (noch NICHT in dieser Runde implementiert):
+//   "Schneider" -> 0 Faenge (bereits als BLANK_TRIP_MARKERS unten vorhanden)
+//   "Nachlaeufer" -> Kontakt/Beobachtung ohne Fang (noch offen, braucht eigenen recordType/Feld)
+//   "Möre" -> Koederbezeichnung (bereits als LURE_ALIASES unten vorhanden)
+// Weitere Begriffe werden iterativ aus der echten Nutzung ergaenzt (siehe Auftrag Runde 6), nicht
+// vorab spekulativ ausgebaut.
+const SPECIES_CANONICAL_NAMES = {
+  zander: "Zander", hecht: "Hecht", barsch: "Barsch", mefo: "Meerforelle",
+};
+
 const WATER_ALIASES = {
   trave: "trave",
   "hemmelsdorfer see": "hemmelsdorfer_see", hemmelsdorfer: "hemmelsdorfer_see",
@@ -54,12 +75,31 @@ function buildSpotAliases() {
   return aliases;
 }
 
-// Spot -> [spot_id, water_id]. SPOT_CANONICAL_NAMES (spot_id -> gesprochener Name) wird fuer den
-// Fuzzy-Resolver in extractor.js gebraucht (Abschnitt 5).
+// Spot -> [spot_id, water_id].
 const SPOT_ALIASES = buildSpotAliases();
-const SPOT_CANONICAL_NAMES = Object.fromEntries(
-  Object.entries(SPOT_ALIASES).map(([alias, [spotKey]]) => [spotKey, alias])
-);
+
+// SPOT_CANONICAL_NAMES: spot_id -> HUEBSCHER ANZEIGENAME ("bliesdorf" -> "Bliesdorf"). Vorher wurde
+// das aus dem (kleingeschriebenen) Alias-Text abgeleitet, was in der Confirm Card/den Fuzzy-Match-
+// Hinweisen faelschlich klein angezeigt wurde ("...ähnelt bekanntem Spot 'bliesdorf'" statt
+// 'Bliesdorf'). Jetzt (Runde 6): Quelle ist der bereits korrekt grossgeschriebene `info.name` aus
+// FIMefoModel.SPOT_STATS (dieselbe EINE Quelle wie schon SPOT_ALIASES, siehe buildSpotAliases oben)
+// — plus die manuellen Spots (z.B. Herrenwyk), die nicht im Modell stehen.
+const SPOT_CANONICAL_NAMES = (() => {
+  const names = { herrenwyk: "Herrenwyk" };
+  const stats = (window.FIMefoModel && window.FIMefoModel.SPOT_STATS) || {};
+  for (const [spotKey, info] of Object.entries(stats)) {
+    if (spotKey === "ostsee_allgemein") continue;
+    names[spotKey] = info.name;
+  }
+  return names;
+})();
+
+// WATER_CANONICAL_NAMES: water_id -> huebscher Anzeigename, analog zu SPOT_CANONICAL_NAMES (fuer
+// den Fall, dass nur ein Gewaesser ohne konkreten Spot erkannt wurde).
+const WATER_CANONICAL_NAMES = {
+  trave: "Trave", hemmelsdorfer_see: "Hemmelsdorfer See", stockssee: "Stockssee",
+  luebecker_bucht: "Lübecker Bucht",
+};
 
 const LURE_ALIASES = {
   gummifisch: "Gummifisch", gummis: "Gummifisch", gummi: "Gummifisch",
@@ -152,7 +192,8 @@ function mergeUserVocabulary(entries) {
 }
 
 window.GAZ = {
-  SPECIES_ALIASES, WATER_ALIASES, SPOT_ALIASES, SPOT_CANONICAL_NAMES, LURE_ALIASES, LURE_COLOR_ALIASES,
+  SPECIES_ALIASES, SPECIES_CANONICAL_NAMES, WATER_ALIASES, WATER_CANONICAL_NAMES,
+  SPOT_ALIASES, SPOT_CANONICAL_NAMES, LURE_ALIASES, LURE_COLOR_ALIASES,
   GERMAN_NUMBER_WORDS, BLANK_TRIP_MARKERS, CONTACT_BLANK_MARKERS,
   QUALITATIVE_QUANTITY_MARKERS, UNKNOWN_QUANTITY_MARKERS, MONTH_NAMES, DAYPART_MARKERS,
   OBSERVATION_MARKERS, HEARSAY_MARKERS, DIRECT_REPORT_VERBS, toAsciiDe, mergeUserVocabulary,
