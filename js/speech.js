@@ -31,7 +31,12 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
                                      // einer ueberholten Instanz erkennen sich daran und werden ignoriert
     this._userStopped = false;      // true erst NACH explizitem stop() durch den Nutzer
     this._sessionFinished = false;  // Schutz gegen doppeltes Feuern von onSessionEnd
-    this._finalTranscript = "";     // ueber ALLE Recognition-Instanzen dieser Session akkumuliert
+    // sessionFinalTranscript: NUR bereits abgeschlossene (committete) Recognition-Instanzen dieser
+    // Session (Voice Reliability Loop Runde 3). Wird EINMAL pro Instanz in onend fortgeschrieben,
+    // niemals in onresult - onresult darf nur den State DER AKTUELL LAUFENDEN Instanz veraendern
+    // (siehe _instanceFinalByIndex/_instanceInterim in _beginRecognition). Das trennt bewusst
+    // "abgeschlossen" von "wird gerade erkannt", statt beides in einem Feld zu vermischen.
+    this._sessionFinalTranscript = "";
     this._restartCount = 0;
     this._maxRestarts = 30;         // Sicherheitsnetz gegen Endlosschleifen (z.B. defektes Mikrofon)
     this._restartDelayMs = 80;      // kurze Pause vor Neustart (manche Android-Chrome-Versionen werfen
@@ -45,10 +50,15 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
 
   // Callback-Schnittstelle (bewusst unveraendert ggue. vorheriger Version, damit app.js nicht
   // angepasst werden musste):
-  //   onInterim(text)        — Live-Zwischentext der AKTUELL laufenden Recognition-Instanz
+  //   onInterim(text)        — LIVE-VORSCHAU = sessionFinalTranscript + currentInterimTranscript
+  //                            (Runde 3: vorher wurde hier nur das lose Interim-Fragment der
+  //                            aktuellen Instanz durchgereicht - jetzt der volle, wachsende Satz,
+  //                            wie im Auftrag als Live-Anzeige-Prinzip vorgegeben). Wird bei JEDEM
+  //                            onresult komplett NEU BERECHNET, nicht angehaengt.
   //   onSessionEnd(fullText) — feuert GENAU EINMAL, wenn die gesamte Voice Session beendet ist
   //                            (Nutzer hat STOP gedrueckt, ODER ein nicht behebbarer Fehler trat auf).
-  //                            fullText ist das ueber die gesamte Session akkumulierte Transkript.
+  //                            fullText ist NUR sessionFinalTranscript (plus ggf. ein sauber per
+  //                            isFinal uebernommener letzter Rest) - NIE ungesicherte Interim-Reste.
   //   onError(message)       — nicht-fatale Warnung (Toast); Session laeuft ggf. weiter, ODER
   //                            fataler Fehler, der direkt danach auch onSessionEnd ausloest
   start(onInterim, onSessionEnd, onError) {
@@ -61,7 +71,7 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     this._callbacks = { onInterim, onSessionEnd, onError };
     this._userStopped = false;
     this._sessionFinished = false;
-    this._finalTranscript = "";
+    this._sessionFinalTranscript = "";
     this._restartCount = 0;
     this._beginRecognition();
   }
@@ -70,30 +80,54 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     if (this._sessionFinished) return; // Schutz: darf nur einmal feuern (z.B. bei stop() waehrend Restart-Race)
     this._sessionFinished = true;
     this._recognition = null;
-    this._callbacks?.onSessionEnd?.(this._finalTranscript.trim());
+    this._callbacks?.onSessionEnd?.(this._sessionFinalTranscript.trim());
   }
 
   _beginRecognition() {
     const myGeneration = ++this._generation;
     const rec = new this._Recognition();
     rec.lang = "de-DE";
-    rec.continuous = true;       // WICHTIG (Kernfix): nicht nach der ersten Sprechpause abbrechen
+    rec.continuous = true;       // WICHTIG (Kernfix Runde 1): nicht nach der ersten Sprechpause abbrechen
     rec.interimResults = true;
     rec.maxAlternatives = 1;
 
+    // Instanz-lokaler State (Runde 3 — Interim-Deduplizierung). BEWUSST pro Recognition-Instanz neu
+    // angelegt (Closure-Variablen, nicht this.*): jede neue Instanz nach einem Restart faengt bei
+    // einem LEEREN Index-Register an, damit bereits committete (sessionFinalTranscript) Fragmente
+    // niemals erneut hineingeraten koennen, selbst wenn Android/Chrome beim naechsten `onresult`
+    // wieder bei resultIndex 0 anfaengt zu zaehlen.
+    //   _instanceFinalByIndex: Map<resultIndex, transcript> — IDEMPOTENT befuellt (ueberschreiben,
+    //     nie anhaengen), deckt sowohl "isFinal flackert bei wiederholtem onresult fuer denselben
+    //     Index erneut true" als auch "resultIndex springt nicht wie erwartet vorwaerts" ab.
+    //   _instanceInterim: einzelner String, bei JEDEM onresult ERSETZT, nie angehaengt — genau der
+    //     im Auftrag geforderte Unterschied zwischen "aktuell verfeinerte Hypothese" (ersetzen) und
+    //     "abgeschlossenes Fragment" (uebernehmen).
+    const instanceFinalByIndex = {};
+    let instanceInterim = "";
+
+    const instanceFinalSoFar = () => Object.keys(instanceFinalByIndex)
+      .map(Number).sort((a, b) => a - b).map((i) => instanceFinalByIndex[i]).join(" ").trim();
+
     rec.onresult = (ev) => {
       if (myGeneration !== this._generation) return; // veraltete Instanz (Race Condition) -> ignorieren
-      let interim = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      // Absichtlich das GESAMTE ev.results-Array ab Index 0 durchgehen (nicht ab ev.resultIndex):
+      // manche Android-Chrome-Versionen liefern resultIndex nicht zuverlaessig fortlaufend. Da
+      // instanceFinalByIndex ein idempotentes Register ist (Ueberschreiben statt Anhaengen), macht
+      // ein wiederholtes Verarbeiten bereits bekannter Indizes nichts kaputt - es aendert nur dann
+      // etwas, wenn sich der Inhalt fuer diesen Index tatsaechlich veraendert hat.
+      let interimNow = "";
+      for (let i = 0; i < ev.results.length; i++) {
         const transcript = ev.results[i][0].transcript;
         if (ev.results[i].isFinal) {
-          // Fragment-Akkumulation: JEDES finale Fragment wird angehaengt, nicht ueberschrieben.
-          this._finalTranscript = (this._finalTranscript + " " + transcript).trim();
+          instanceFinalByIndex[i] = transcript; // Ueberschreiben, NICHT anhaengen
         } else {
-          interim += transcript;
+          interimNow += transcript; // Interim-Text dieses EINEN Events - wird unten ERSETZT, nicht summiert
         }
       }
-      if (interim) this._callbacks?.onInterim?.(interim);
+      instanceInterim = interimNow; // ERSETZEN, nicht anhaengen — behebt die in Runde 3 gemeldete Dopplung
+      const livePreview = [this._sessionFinalTranscript, instanceFinalSoFar(), instanceInterim]
+        .filter(Boolean).join(" ").trim();
+      this._callbacks?.onInterim?.(livePreview);
     };
 
     rec.onerror = (ev) => {
@@ -129,6 +163,15 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     rec.onend = () => {
       if (myGeneration !== this._generation) return; // veraltete Instanz -> ignorieren
       this._recognition = null;
+      // KERNSTUECK Runde 3: genau HIER, beim tatsaechlichen Ende DIESER Instanz, wird ihr bisher
+      // gesammelter finaler Text (idempotent aus instanceFinalByIndex zusammengesetzt) EIN EINZIGES
+      // MAL in den Session-weiten Akkumulator uebernommen — egal ob die Session danach neu startet
+      // oder wirklich endet. Instanz-Interim-Reste (instanceInterim) werden NICHT uebernommen: nicht
+      // final bestaetigter Text darf nie in sessionFinalTranscript landen, auch nicht beim Restart.
+      const committed = instanceFinalSoFar();
+      if (committed) {
+        this._sessionFinalTranscript = (this._sessionFinalTranscript + " " + committed).trim();
+      }
       if (this._userStopped) { this._finishSession(); return; }
       if (this._restartCount >= this._maxRestarts) {
         this._callbacks?.onError?.("Spracherkennung wurde zu oft unterbrochen — Aufnahme wird beendet, bitte Text prüfen/ergänzen.");
