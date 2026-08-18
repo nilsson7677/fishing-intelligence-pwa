@@ -29,6 +29,26 @@
 // AUFEINANDERFOLGENDEN result-Eintraegen (nicht ueber eine globale "doppelte Woerter entfernen"-
 // Heuristik auf dem fertigen String, die legitime Wiederholungen wie "sehr sehr langsam" zerstoeren
 // wuerde).
+//
+// RUNDE 5 — der reale Android-Debug-Log (aus dem Runde-4-Testmodus) bestaetigte das erwartete
+// Muster (mehrere wachsende isFinal=true-Ergebnisse an neuen Indizes fuer DASSELBE Segment) UND
+// zeigte, dass der reine STRIKTE Zeichen-Praefix-Vergleich aus Runde 4 nicht in jedem Fall robust
+// genug ist. Die Merge-Regel wurde daher auf die vom Auftrag vorgegebenen 5 Faelle praezisiert
+// (siehe `_classifyCandidate`):
+//   (1) neuer Kandidat ist identisch mit dem bisherigen Segment          -> ignorieren
+//   (2) neuer Kandidat erweitert den bisherigen woertlich am Anfang      -> bisherigen ERSETZEN
+//   (3) bisheriger Kandidat erweitert (ist laenger als) den neuen        -> neuen ignorieren
+//       (Schutz gegen einen von der Recognition-Engine "zurueckgenommenen", kuerzeren Zwischenstand)
+//   (4) sehr grosser gemeinsamer WORT-Praefix (nicht mehr nur Zeichen-Praefix) UND neuer Kandidat
+//       klar laenger (mehr Woerter)                                     -> bisherigen ERSETZEN
+//       (toleriert kleine Nachkorrekturen der Recognition-Engine an bereits gesprochenen Woertern,
+//       die einen reinen Zeichen-Praefix-Vergleich brechen wuerden)
+//   (5) sonst: kein Revisionsverhaeltnis erkennbar                       -> echtes neues Segment
+// Bewusst KEINE zeitbasierte Pause-Erkennung als PRIMAERES Kriterium: ein Recognition-Restart ist
+// bereits eine harte Instanzgrenze (neue Instanz = neue, leere Segmentliste), und zwei echte,
+// unabhaengige Saetze erfuellen praktisch nie die strenge Wort-Praefix-Abdeckung aus Regel 4 - eine
+// zusaetzliche starre Zeitschwelle wuerde das Risiko bergen, eine einzelne, natuerlich pausierte
+// Aussage faelschlich in zwei Segmente zu zerreissen.
 
 class SpeechToTextProvider {
   isAvailable() { throw new Error("not implemented"); }
@@ -138,12 +158,41 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     return s.trim().toLowerCase().replace(/[.,!?;:]+$/, "");
   }
 
-  _isGrowingRevisionOf(prevText, newText) {
+  _wordsOf(s) {
+    return this._normalizeForPrefixCompare(s).split(/\s+/).filter(Boolean);
+  }
+
+  _commonWordPrefixLen(aWords, bWords) {
+    let n = 0;
+    while (n < aWords.length && n < bWords.length && aWords[n] === bWords[n]) n++;
+    return n;
+  }
+
+  // RUNDE 5 — die 5-Fall-Merge-Regel aus dem Auftrag. Gibt zurueck:
+  //   "replace"          — neuer Kandidat ersetzt das bisherige Segment (Faelle 2 & 4)
+  //   "ignore-duplicate"  — identisch, nichts aendert sich (Fall 1)
+  //   "ignore-shorter"    — bisheriges Segment ist bereits die vollstaendigere Fassung (Fall 3)
+  //   "new-segment"       — kein Revisionsverhaeltnis erkennbar (Fall 5)
+  _classifyCandidate(prevText, newText) {
     const a = this._normalizeForPrefixCompare(prevText);
     const b = this._normalizeForPrefixCompare(newText);
-    if (!a) return true;   // leeres/kein Vorgaenger-Segment -> ersetzen statt ein leeres Segment zu fuehren
-    if (a === b) return true; // identische (erneut gelieferte) Fassung -> ersetzen, NICHT duplizieren
-    return b.startsWith(a);   // neuer Text erweitert den alten woertlich am Anfang -> Revision desselben Segments
+    if (!a) return "replace";               // kein/leeres Vorgaenger-Segment -> einfach uebernehmen
+    if (a === b) return "ignore-duplicate"; // Fall 1
+    if (b.startsWith(a)) return "replace";  // Fall 2: neuer Kandidat erweitert den bisherigen woertlich
+    if (a.startsWith(b)) return "ignore-shorter"; // Fall 3: bisheriger ist bereits die laengere Fassung
+
+    // Fall 4: kein exakter Zeichen-Praefix, aber ein sehr grosser gemeinsamer WORT-Praefix UND der
+    // neue Kandidat ist klar laenger -> toleriert kleine Nachkorrekturen einzelner (meist letzter)
+    // Woerter, die einen reinen Zeichen-Praefix-Vergleich brechen wuerden, ohne bei zwei echten,
+    // unabhaengigen Saetzen faelschlich anzuschlagen (die teilen so gut wie nie fast alle Woerter).
+    const aWords = this._wordsOf(prevText);
+    const bWords = this._wordsOf(newText);
+    const common = this._commonWordPrefixLen(aWords, bWords);
+    const coversMostOfOld = aWords.length > 0 && common >= aWords.length - 1 && common / aWords.length >= 0.7;
+    const clearlyLonger = bWords.length > aWords.length;
+    if (common >= 2 && coversMostOfOld && clearlyLonger) return "replace";
+
+    return "new-segment"; // Fall 5
   }
 
   _mergeGrowingSegments(rawEntries) {
@@ -152,10 +201,17 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
       const text = entry.transcript.trim();
       if (!text) continue;
       const last = merged[merged.length - 1];
-      if (last && this._isGrowingRevisionOf(last.text, text)) {
-        merged[merged.length - 1] = { text, final: entry.isFinal }; // ERSETZEN, nicht anhaengen
+      if (!last) { merged.push({ text, final: entry.isFinal }); continue; }
+      const verdict = this._classifyCandidate(last.text, text);
+      if (verdict === "replace") {
+        merged[merged.length - 1] = { text, final: entry.isFinal };
+      } else if (verdict === "ignore-duplicate" || verdict === "ignore-shorter") {
+        // Bisheriges Segment bleibt inhaltlich stehen — aber falls der ignorierte Kandidat final
+        // war und das bisherige Segment das noch nicht ist, wird der Final-Status trotzdem
+        // uebernommen (der Inhalt ist ja mindestens genauso vollstaendig).
+        if (entry.isFinal && !last.final) merged[merged.length - 1] = { text: last.text, final: true };
       } else {
-        merged.push({ text, final: entry.isFinal }); // echtes neues, unabhaengiges Segment
+        merged.push({ text, final: entry.isFinal }); // Fall 5: echtes neues, unabhaengiges Segment
       }
     }
     return merged;

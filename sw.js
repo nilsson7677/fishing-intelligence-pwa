@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v5"; // v5: Voice Reliability Loop Runde 4 (segmentbasierte Final-Verarbeitung + Debug-Log)
+const CACHE_NAME = "fishintel-shell-v6"; // v6: Voice Reliability Loop Runde 5 (5-Fall-Merge-Regel gegen echten Debug-Log)
 const SHELL_FILES = [
   "./",
   "./index.html",
