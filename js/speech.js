@@ -15,6 +15,20 @@
 // erzeugt einzelne, kurzlebige Recognition-Instanzen; die Klasse selbst haelt den kumulierten
 // Transkript-Zustand UEBER mehrere Instanzen hinweg und entscheidet, ob nach einem `onend`
 // automatisch neu gestartet wird oder die Session wirklich beendet ist.
+//
+// RUNDE 4 — WICHTIGE KORREKTUR gegenueber Runde 3: der echte Android-Test zeigte, dass Android
+// NICHT nur EIN finales Ergebnis pro logischem Satzteil liefert (mit vorherigen Interim-Stufen),
+// sondern MEHRERE, jeweils LAENGER werdende Ergebnisse, die ALLE mit isFinal=true markiert sind
+// UND jeweils an einem NEUEN Index in event.results stehen (z.B. Index 0 = "Kai-Uwe" (final),
+// Index 1 = "Kai-Uwe hat" (final), Index 2 = "Kai-Uwe hat gestern" (final), ...). Die Runde-3-
+// Logik (idempotent PRO INDEX ueberschreiben) half hier nicht, weil jede Revision einen NEUEN
+// Index bekam - es waren aus Sicht des Codes "verschiedene" finale Segmente. Die eigentliche Frage
+// ist daher NICHT mehr nur "isFinal true/false?", sondern "ist dieses Final-Ergebnis ein NEUES
+// Segment - oder nur eine laengere Fassung des vorherigen Segments?". Siehe `_mergeGrowingSegments`
+// weiter unten: die Erkennung erfolgt ueber einen INHALTLICHEN Praefix-Vergleich ZWISCHEN
+// AUFEINANDERFOLGENDEN result-Eintraegen (nicht ueber eine globale "doppelte Woerter entfernen"-
+// Heuristik auf dem fertigen String, die legitime Wiederholungen wie "sehr sehr langsam" zerstoeren
+// wuerde).
 
 class SpeechToTextProvider {
   isAvailable() { throw new Error("not implemented"); }
@@ -42,14 +56,31 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     this._restartDelayMs = 80;      // kurze Pause vor Neustart (manche Android-Chrome-Versionen werfen
                                      // InvalidStateError bei sofortigem re-start() innerhalb von onend)
     this._callbacks = null;
+    // Debug-Log (Runde 4, "Bitte zuerst instrumentieren"): protokolliert JEDES onresult-Ereignis
+    // roh, BEVOR irgendeine Merge-/Dedup-Logik angewendet wird - damit sich das tatsaechliche
+    // Android-Verhalten beim naechsten Geraetetest exakt nachvollziehen laesst, falls die
+    // Merge-Logik in einem noch nicht bedachten Fall versagt. Immer aktiv (vernachlaessigbarer
+    // Overhead, auf 300 Eintraege begrenzt), aber nur im Testmodus (URL-Flag ?voicedebug=1) in der
+    // UI sichtbar gemacht (siehe app.js). Wird bei jedem start() geleert.
+    this._debugSeq = 0;
+    this._debugLog = [];
   }
 
   isAvailable() {
     return this._Recognition !== null && (window.isSecureContext !== false);
   }
 
-  // Callback-Schnittstelle (bewusst unveraendert ggue. vorheriger Version, damit app.js nicht
-  // angepasst werden musste):
+  getDebugLog() {
+    return this._debugLog.slice();
+  }
+
+  _pushDebug(entry) {
+    this._debugLog.push(entry);
+    if (this._debugLog.length > 300) this._debugLog.shift();
+    this._callbacks?.onDebug?.(entry);
+  }
+
+  // Callback-Schnittstelle (onDebug ist NEU in Runde 4, alle anderen unveraendert):
   //   onInterim(text)        — LIVE-VORSCHAU = sessionFinalTranscript + currentInterimTranscript
   //                            (Runde 3: vorher wurde hier nur das lose Interim-Fragment der
   //                            aktuellen Instanz durchgereicht - jetzt der volle, wachsende Satz,
@@ -61,18 +92,23 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
   //                            isFinal uebernommener letzter Rest) - NIE ungesicherte Interim-Reste.
   //   onError(message)       — nicht-fatale Warnung (Toast); Session laeuft ggf. weiter, ODER
   //                            fataler Fehler, der direkt danach auch onSessionEnd ausloest
-  start(onInterim, onSessionEnd, onError) {
+  //   onDebug(entry)         — OPTIONAL, feuert bei JEDEM rohen onresult-Ereignis (vor jeder Merge-
+  //                            Logik) mit { seq, resultIndex, resultsCount, entries, instanceId, t }.
+  //                            Nur fuer den Testmodus gedacht (siehe app.js ?voicedebug=1).
+  start(onInterim, onSessionEnd, onError, onDebug) {
     if (!this.isAvailable()) { onError("Spracherkennung auf diesem Geraet/Browser nicht verfuegbar."); return; }
     if (!navigator.onLine) {
       onError("Spracherkennung braucht in diesem Browser eine Internetverbindung (Cloud-basierte " +
         "Erkennung, siehe docs/STT_RESEARCH.md) — aktuell offline. Bitte Text eintippen.");
       return;
     }
-    this._callbacks = { onInterim, onSessionEnd, onError };
+    this._callbacks = { onInterim, onSessionEnd, onError, onDebug };
     this._userStopped = false;
     this._sessionFinished = false;
     this._sessionFinalTranscript = "";
     this._restartCount = 0;
+    this._debugSeq = 0;
+    this._debugLog = [];
     this._beginRecognition();
   }
 
@@ -83,6 +119,48 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     this._callbacks?.onSessionEnd?.(this._sessionFinalTranscript.trim());
   }
 
+  // RUNDE 4 — Kernstueck der segmentbasierten Final-Verarbeitung. Praeziser Auftrag: "Ist dieses
+  // neue Final-Ergebnis ein neues Segment - oder nur eine laengere Revision des vorherigen
+  // Segments?" Die Antwort wird NICHT global/String-weit ("doppelte Woerter entfernen") gesucht -
+  // das wuerde legitime Wiederholungen wie "sehr sehr langsam" zerstoeren -, sondern ausschliesslich
+  // durch einen Praefix-Vergleich ZWISCHEN ZWEI AUFEINANDERFOLGENDEN result-Eintraegen (derselben
+  // Instanz, in der Reihenfolge von ev.results): wenn der naechste Eintrag mit dem Text des
+  // vorherigen (normalisiert) beginnt, ist er eine Revision desselben Segments -> ERSETZEN. Sonst
+  // ist er ein neues, unabhaengiges Segment -> ANHAENGEN. Diese Funktion wird bei JEDEM onresult
+  // komplett neu ueber das gesamte aktuelle ev.results-Array ausgefuehrt (kein inkrementeller
+  // State ausserhalb von ev.results selbst) und ist damit von Natur aus idempotent.
+  _normalizeForPrefixCompare(s) {
+    // Nachsichtig gegenueber Gross-/Kleinschreibung und abschliessenden Satzzeichen, DAMIT eine
+    // spaete Interpunktions-/Gross-Korrektur durch die Recognition-Engine nicht faelschlich als
+    // "neues Segment" gewertet wird - aber weiterhin ein STRIKTER Praefix-Vergleich, keine Fuzzy-
+    // Distanz. Das ist bewusst konservativ: lieber ein paar Grenzfaelle nicht zusammenfuehren, als
+    // durch zu aggressives Matching zwei tatsaechlich unabhaengige Saetze faelschlich zu verschmelzen.
+    return s.trim().toLowerCase().replace(/[.,!?;:]+$/, "");
+  }
+
+  _isGrowingRevisionOf(prevText, newText) {
+    const a = this._normalizeForPrefixCompare(prevText);
+    const b = this._normalizeForPrefixCompare(newText);
+    if (!a) return true;   // leeres/kein Vorgaenger-Segment -> ersetzen statt ein leeres Segment zu fuehren
+    if (a === b) return true; // identische (erneut gelieferte) Fassung -> ersetzen, NICHT duplizieren
+    return b.startsWith(a);   // neuer Text erweitert den alten woertlich am Anfang -> Revision desselben Segments
+  }
+
+  _mergeGrowingSegments(rawEntries) {
+    const merged = [];
+    for (const entry of rawEntries) {
+      const text = entry.transcript.trim();
+      if (!text) continue;
+      const last = merged[merged.length - 1];
+      if (last && this._isGrowingRevisionOf(last.text, text)) {
+        merged[merged.length - 1] = { text, final: entry.isFinal }; // ERSETZEN, nicht anhaengen
+      } else {
+        merged.push({ text, final: entry.isFinal }); // echtes neues, unabhaengiges Segment
+      }
+    }
+    return merged;
+  }
+
   _beginRecognition() {
     const myGeneration = ++this._generation;
     const rec = new this._Recognition();
@@ -91,41 +169,43 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     rec.interimResults = true;
     rec.maxAlternatives = 1;
 
-    // Instanz-lokaler State (Runde 3 — Interim-Deduplizierung). BEWUSST pro Recognition-Instanz neu
-    // angelegt (Closure-Variablen, nicht this.*): jede neue Instanz nach einem Restart faengt bei
-    // einem LEEREN Index-Register an, damit bereits committete (sessionFinalTranscript) Fragmente
-    // niemals erneut hineingeraten koennen, selbst wenn Android/Chrome beim naechsten `onresult`
-    // wieder bei resultIndex 0 anfaengt zu zaehlen.
-    //   _instanceFinalByIndex: Map<resultIndex, transcript> — IDEMPOTENT befuellt (ueberschreiben,
-    //     nie anhaengen), deckt sowohl "isFinal flackert bei wiederholtem onresult fuer denselben
-    //     Index erneut true" als auch "resultIndex springt nicht wie erwartet vorwaerts" ab.
-    //   _instanceInterim: einzelner String, bei JEDEM onresult ERSETZT, nie angehaengt — genau der
-    //     im Auftrag geforderte Unterschied zwischen "aktuell verfeinerte Hypothese" (ersetzen) und
-    //     "abgeschlossenes Fragment" (uebernehmen).
-    const instanceFinalByIndex = {};
-    let instanceInterim = "";
+    // Instanz-lokaler State (Runde 4 — segmentbasierte Final-Verarbeitung). BEWUSST pro Recognition-
+    // Instanz neu angelegt (Closure-Variable, nicht this.*): jede neue Instanz nach einem Restart
+    // faengt bei einer LEEREN Segmentliste an, damit bereits committete (sessionFinalTranscript)
+    // Fragmente niemals erneut hineingeraten koennen.
+    //   instanceSegments: Array<{text, final}> — wird bei JEDEM onresult KOMPLETT NEU aus dem
+    //     gesamten aktuellen ev.results-Array (ab Index 0) berechnet (siehe _mergeGrowingSegments
+    //     weiter unten), NICHT inkrementell fortgeschrieben. Dadurch ist die Verarbeitung von Natur
+    //     aus idempotent und robust sowohl gegen einen unzuverlaessigen ev.resultIndex als auch
+    //     gegen das in Runde 4 beobachtete Android-Verhalten (mehrere, jeweils laenger werdende
+    //     isFinal=true-Ergebnisse an verschiedenen Indizes fuer DASSELBE Segment).
+    let instanceSegments = [];
 
-    const instanceFinalSoFar = () => Object.keys(instanceFinalByIndex)
-      .map(Number).sort((a, b) => a - b).map((i) => instanceFinalByIndex[i]).join(" ").trim();
+    const instanceFinalSoFar = () => instanceSegments
+      .filter((s) => s.final).map((s) => s.text).join(" ").trim();
 
     rec.onresult = (ev) => {
       if (myGeneration !== this._generation) return; // veraltete Instanz (Race Condition) -> ignorieren
-      // Absichtlich das GESAMTE ev.results-Array ab Index 0 durchgehen (nicht ab ev.resultIndex):
-      // manche Android-Chrome-Versionen liefern resultIndex nicht zuverlaessig fortlaufend. Da
-      // instanceFinalByIndex ein idempotentes Register ist (Ueberschreiben statt Anhaengen), macht
-      // ein wiederholtes Verarbeiten bereits bekannter Indizes nichts kaputt - es aendert nur dann
-      // etwas, wenn sich der Inhalt fuer diesen Index tatsaechlich veraendert hat.
-      let interimNow = "";
+
+      // Rohdaten fuer das Debug-Log (Runde 4) — UNVERAENDERT, bevor irgendeine Merge-Logik lief:
+      this._debugSeq++;
+      const rawEntries = [];
       for (let i = 0; i < ev.results.length; i++) {
-        const transcript = ev.results[i][0].transcript;
-        if (ev.results[i].isFinal) {
-          instanceFinalByIndex[i] = transcript; // Ueberschreiben, NICHT anhaengen
-        } else {
-          interimNow += transcript; // Interim-Text dieses EINEN Events - wird unten ERSETZT, nicht summiert
-        }
+        rawEntries.push({ index: i, isFinal: !!ev.results[i].isFinal, transcript: ev.results[i][0].transcript });
       }
-      instanceInterim = interimNow; // ERSETZEN, nicht anhaengen — behebt die in Runde 3 gemeldete Dopplung
-      const livePreview = [this._sessionFinalTranscript, instanceFinalSoFar(), instanceInterim]
+      this._pushDebug({
+        seq: this._debugSeq, resultIndex: ev.resultIndex, resultsCount: ev.results.length,
+        entries: rawEntries, instanceId: myGeneration, t: Date.now(),
+      });
+
+      // Absichtlich das GESAMTE ev.results-Array ab Index 0 durchgehen (nicht ab ev.resultIndex):
+      // manche Android-Chrome-Versionen liefern resultIndex nicht zuverlaessig fortlaufend.
+      instanceSegments = this._mergeGrowingSegments(rawEntries);
+
+      const finalSoFar = instanceFinalSoFar();
+      const lastSeg = instanceSegments[instanceSegments.length - 1];
+      const interimNow = (lastSeg && !lastSeg.final) ? lastSeg.text : ""; // ERSETZT, nie angehaengt
+      const livePreview = [this._sessionFinalTranscript, finalSoFar, interimNow]
         .filter(Boolean).join(" ").trim();
       this._callbacks?.onInterim?.(livePreview);
     };
@@ -163,11 +243,15 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     rec.onend = () => {
       if (myGeneration !== this._generation) return; // veraltete Instanz -> ignorieren
       this._recognition = null;
-      // KERNSTUECK Runde 3: genau HIER, beim tatsaechlichen Ende DIESER Instanz, wird ihr bisher
-      // gesammelter finaler Text (idempotent aus instanceFinalByIndex zusammengesetzt) EIN EINZIGES
-      // MAL in den Session-weiten Akkumulator uebernommen — egal ob die Session danach neu startet
-      // oder wirklich endet. Instanz-Interim-Reste (instanceInterim) werden NICHT uebernommen: nicht
-      // final bestaetigter Text darf nie in sessionFinalTranscript landen, auch nicht beim Restart.
+      // KERNSTUECK (seit Runde 3, Merge-Logik in Runde 4 geschaerft): genau HIER, beim tatsaechlichen
+      // Ende DIESER Instanz, wird ihr bisher gesammelter finaler Text (aus den zu diesem Zeitpunkt
+      // zusammengefuehrten Segmenten, siehe _mergeGrowingSegments) EIN EINZIGES MAL in den Session-
+      // weiten Akkumulator uebernommen — egal ob die Session danach neu startet oder wirklich endet.
+      // Nicht-finale Segmentreste werden NICHT uebernommen: nicht final bestaetigter Text darf nie
+      // in sessionFinalTranscript landen, auch nicht beim Restart. Da instanceFinalSoFar() bei jedem
+      // onresult komplett NEU aus dem aktuellen Segment-Snapshot berechnet wird (nicht additiv ueber
+      // mehrere Aufrufe summiert), kann es hier auch bei der Sequenz onresult -> stop() -> onend zu
+      // KEINEM Doppelcommit kommen: es wird immer nur der EINE, aktuellste Snapshot committet.
       const committed = instanceFinalSoFar();
       if (committed) {
         this._sessionFinalTranscript = (this._sessionFinalTranscript + " " + committed).trim();

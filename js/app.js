@@ -2,6 +2,14 @@
 // Bewusst ein einziges Modul ohne Framework/Build-Schritt (Abschnitt 4/46: "working software",
 // keine zusaetzliche Komplexitaet, die auf dem Handy getestet werden muesste, ohne Mehrwert).
 
+// VOICE RELIABILITY LOOP Runde 4 — "Bitte zuerst instrumentieren": ueber den URL-Parameter
+// ?voicedebug=1 wird ein Rohdaten-Log JEDES onresult-Ereignisses (seq/resultIndex/resultsCount/
+// Index+isFinal+Transcript je Result/Instanz-ID/Zeitstempel) sichtbar in der UI eingeblendet - NUR
+// im Testmodus, damit ein Geraetetest ohne angeschlossenes Devtools/USB-Debugging trotzdem exakt
+// dokumentieren kann, was Android tatsaechlich liefert (z.B. per Screenshot/Abtippen). Ausserhalb
+// dieses Flags aendert sich am normalen Nutzererlebnis nichts.
+const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug");
+
 const STATE = {
   view: "copilot",
   species: "mefo",
@@ -9,7 +17,7 @@ const STATE = {
   // finalizing: true zwischen "Nutzer hat STOP gedrueckt" und "volles Transkript ist da"
   // (Voice Reliability Loop) - verhindert, dass waehrend dieser kurzen async-Luecke eine neue
   // Aufnahme gestartet wird und die noch ausstehende Extraktion der vorigen Session ueberschreibt.
-  voice: { provider: null, listening: false, finalizing: false, interim: "", draft: null },
+  voice: { provider: null, listening: false, finalizing: false, interim: "", draft: null, debugLog: [] },
   trip: { active: false, session: null, gpsMode: "off", watchId: null, track: [] },
   renderToken: 0,
 };
@@ -464,6 +472,21 @@ async function viewIntelligence() {
     root.appendChild(UI.el("div", { class: "panel" }, [UI.el("div", { class: "panel-label" }, "Live-Transkript"), UI.el("p", {}, STATE.voice.interim)]));
   }
 
+  // Runde 4 Debug-Panel (nur mit ?voicedebug=1 in der URL sichtbar) — zeigt das rohe onresult-Log
+  // dieser Session als Klartext, damit es bei einem echten Geraetetest abfotografiert/abgetippt
+  // werden kann. Bleibt nach STOP stehen (wird erst beim naechsten Start geleert), damit es auch
+  // NACH der Aufnahme noch in Ruhe gelesen werden kann.
+  if (VOICE_DEBUG && STATE.voice.debugLog.length) {
+    const lines = STATE.voice.debugLog.map((e) => {
+      const entries = e.entries.map((x) => `[${x.index}:${x.isFinal ? "F" : "I"} "${x.transcript}"]`).join(" ");
+      return `#${e.seq} inst=${e.instanceId} resultIndex=${e.resultIndex} n=${e.resultsCount} t=${e.t}\n  ${entries}`;
+    }).join("\n");
+    root.appendChild(UI.el("div", { class: "panel debug-panel" }, [
+      UI.el("div", { class: "panel-label" }, `🐞 Voice Debug Log (${STATE.voice.debugLog.length} Ereignisse, ?voicedebug=1)`),
+      UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "10" }, lines),
+    ]));
+  }
+
   const textInput = UI.el("textarea", { placeholder: "…oder Fanginfo als Text eintippen (funktioniert auch offline)" });
   root.appendChild(UI.el("label", {}, "Text-Eingabe (Fallback, immer verfügbar)"));
   root.appendChild(textInput);
@@ -491,7 +514,7 @@ function toggleVoiceCapture() {
   }
   if (!STATE.voice.provider) STATE.voice.provider = new FISpeech.BrowserSpeechToTextProvider();
   if (!STATE.voice.provider.isAvailable()) { UI.toast("Spracherkennung auf diesem Gerät/Browser nicht verfügbar — bitte Text eintippen.", "error"); return; }
-  STATE.voice.listening = true; STATE.voice.finalizing = false; STATE.voice.interim = "";
+  STATE.voice.listening = true; STATE.voice.finalizing = false; STATE.voice.interim = ""; STATE.voice.debugLog = [];
   renderView();
   STATE.voice.provider.start(
     (interim) => { STATE.voice.interim = interim; if (STATE.view === "intelligence") renderView(); },
@@ -503,7 +526,11 @@ function toggleVoiceCapture() {
       if (fullText) runExtraction(fullText);
       else { UI.toast("Keine Sprache erkannt. Bitte nochmal versuchen oder Text eintippen.", "error"); renderView(); }
     },
-    (errMsg) => { UI.toast(errMsg, "error"); if (STATE.view === "intelligence") renderView(); }
+    (errMsg) => { UI.toast(errMsg, "error"); if (STATE.view === "intelligence") renderView(); },
+    // onDebug (Runde 4, nur bei ?voicedebug=1 ueberhaupt sichtbar - siehe viewIntelligence oben):
+    // rohes onresult-Ereignis, wird laufend gesammelt, damit ein echter Geraetetest das tatsaechliche
+    // Android-Verhalten dokumentieren kann, falls die Merge-Logik doch noch einen Fall uebersieht.
+    VOICE_DEBUG ? (entry) => { STATE.voice.debugLog.push(entry); if (STATE.view === "intelligence") renderView(); } : undefined
   );
 }
 

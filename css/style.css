@@ -84,6 +84,14 @@ p { line-height: 1.5; }
 .big-tile.recording { background: linear-gradient(160deg, #a13030, #6e1e1e); }
 .big-tile.finalizing { background: linear-gradient(160deg, #4a4f57, #33373d); cursor: not-allowed; opacity: 0.85; }
 
+/* ---------- Voice Debug Log (Runde 4, nur mit ?voicedebug=1 sichtbar) ---------- */
+.debug-panel { border-color: var(--accent-yellow, #b98900); }
+.debug-log-textarea {
+  width: 100%; box-sizing: border-box; font-family: monospace; font-size: 11px; line-height: 1.4;
+  background: #14171a; color: #d8dee3; border: 1px solid var(--panel-border); border-radius: 8px;
+  padding: 8px; resize: vertical; white-space: pre;
+}
+
 /* ---------- Chips / Badges ---------- */
 .chip { display: inline-block; font-size: 11px; background: var(--panel-border); color: #cfe6f2; padding: 3px 9px; border-radius: 10px; }
 .chip-green { background: #1e4620; color: var(--accent-green); }
