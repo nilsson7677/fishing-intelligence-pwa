@@ -626,6 +626,18 @@ function renderCatchForm(root) {
           await FIDB.put("fishing_session", session);
           UI.toast(`Umweltdaten für Fang: ${snap.status === "complete" ? "vollständig ergänzt" : snap.status}.`, snap.status === "failed" ? "" : "success");
           if (STATE.view === "angeln") renderView();
+          // PHASE 5 (GO-Freigabe): explizites Outcome ist hier immer bekannt (Nullrunde-Checkbox
+          // bzw. Anzahl explizit gesetzt) — Shadow-Auswertung nur fuer Mefo/Lübecker Bucht (Scope
+          // von CHALLENGER_STATE_V1, siehe shadow.js).
+          if (window.FIShadow) {
+            await window.FIShadow.recordShadowEvaluation({
+              linkedEntityType: "fishing_session", linkedEntityId: session.session_id,
+              species: session.species_target, waterId: session.water_id,
+              snapshot: snap, dateIso: session.date,
+              spotKey: session.spot_id, shoreOrBoat: null, sessionDurationMinutes: null,
+              outcomeKnown: true, fangJa: count > 0, catchCountMefo: count,
+            });
+          }
         })
         .catch((e) => UI.toast("Umweltdaten-Abruf im Hintergrund fehlgeschlagen: " + e.message, "error"));
     } }, "✓ Speichern"),
@@ -676,13 +688,34 @@ function renderTripScreen(root) {
       UI.el("p", {}, "Standard: KEIN GPS. Ein Trip kann vollständig ohne Standort geführt werden (Start-/Endzeit, Gewässer, Spot manuell, Köder, Fänge, Nullrunde)."),
       UI.el("button", { class: "btn btn-primary", onclick: () => {
         STATE.trip.active = true;
-        STATE.trip.session = { session_id: FIDB.newId("sess"), angler: "Nils", start_time: new Date().toISOString(), water_id: "luebecker_bucht", spot_id: null, result_fish_count: 0, result_contact_count: 0 };
+        STATE.trip.session = { session_id: FIDB.newId("sess"), angler: "Nils", start_time: new Date().toISOString(), water_id: "luebecker_bucht", spot_id: null, shore_or_boat: null, result_fish_count: 0, result_contact_count: 0 };
         renderTripScreen(root);
       } }, "▶ Trip starten (ohne GPS)"),
     ]));
   } else {
+    const s = STATE.trip.session;
+    // PHASE 5 (GO-Freigabe): optionale, NICHT verpflichtende Kontextfelder Ufer/Boot + Spot —
+    // dienen ausschliesslich der spaeteren Stratifizierung im Shadow-Pilot (siehe
+    // PHASE5_REGIME_STATE_SHADOW_PILOT_SPEC.md, Abschnitt 6.3/7 "Methode/Platform-Confounder"),
+    // fliessen NICHT in Champion oder Challenger ein. "Soweit verfügbar" — der Trip laesst sich
+    // unveraendert ohne diese Angaben starten und beenden.
+    const shoreBoatRow = UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
+      UI.el("div", { class: "panel-label" }, "Ufer/Boot (optional)"),
+      UI.el("div", { class: "btn-row" }, [
+        UI.el("button", { class: `btn ${s.shore_or_boat === "ufer" ? "btn-primary" : "btn-ghost"}`, onclick: () => { s.shore_or_boat = s.shore_or_boat === "ufer" ? null : "ufer"; renderTripScreen(root); } }, "🚶 Ufer"),
+        UI.el("button", { class: `btn ${s.shore_or_boat === "boot" ? "btn-primary" : "btn-ghost"}`, onclick: () => { s.shore_or_boat = s.shore_or_boat === "boot" ? null : "boot"; renderTripScreen(root); } }, "🚤 Boot"),
+      ]),
+    ]);
+    const spotSel = UI.el("select", { onchange: (e) => { s.spot_id = e.target.value || null; } });
+    spotSel.appendChild(UI.el("option", { value: "" }, "(kein bestimmter Spot)"));
+    FIDB.getAll("spot").then((spots) => {
+      spots.filter((sp) => sp.water_id === s.water_id).forEach((sp) =>
+        spotSel.appendChild(UI.el("option", { value: sp.spot_id, ...(s.spot_id === sp.spot_id ? { selected: "selected" } : {}) }, sp.name)));
+    });
+    const spotRow = UI.el("div", { class: "panel" }, [UI.el("div", { class: "panel-label" }, "Spot (optional)"), spotSel]);
+
     root.appendChild(UI.el("div", { class: "panel" }, [
-      UI.el("p", {}, `Trip läuft seit ${new Date(STATE.trip.session.start_time).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}.`),
+      UI.el("p", {}, `Trip läuft seit ${new Date(s.start_time).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}.`),
       UI.el("button", { class: "btn btn-ghost", onclick: async () => {
         if (!navigator.geolocation) { UI.toast("Geolocation auf diesem Gerät nicht verfügbar.", "error"); return; }
         navigator.geolocation.getCurrentPosition((pos) => {
@@ -695,10 +728,102 @@ function renderTripScreen(root) {
       STATE.trip.gpsMode !== "track"
         ? UI.el("button", { class: "btn btn-secondary", style: "margin-top:8px;", onclick: () => startFullTrack(root) }, "🔴 Routenaufzeichnung starten")
         : UI.el("button", { class: "btn btn-danger", style: "margin-top:8px;", onclick: () => stopFullTrack(root) }, "⏹ Routenaufzeichnung stoppen"),
-      UI.el("button", { class: "btn btn-primary", style: "margin-top:16px;", onclick: () => endTrip(root) }, "⏹ Trip beenden"),
+      UI.el("button", { class: "btn btn-primary", style: "margin-top:16px;", onclick: () => renderTripOutcomeStep(root) }, "⏹ Trip beenden"),
     ]));
+    root.appendChild(shoreBoatRow);
+    root.appendChild(spotRow);
   }
   root.appendChild(UI.el("button", { class: "btn btn-ghost", style: "margin-top:16px;", onclick: () => renderView() }, "← Zurück"));
+}
+
+// PHASE 5 (GO-Freigabe 19.08.2026, Auftrag Punkt 2 "Nullrunden"): verbindliche, moeglichst
+// einfache Trip-Abschlusslogik. "Trip beenden" fuehrt IMMER zuerst durch diese Outcome-Abfrage —
+// eine abgeschlossene Session bekommt dadurch garantiert ein explizites Outcome (catch/no_catch),
+// eine Nullrunde ist ein vollwertiger Datenpunkt, kein fehlender Wert (siehe Auftrag). Bewusst als
+// eigene App-Ansicht (nicht window.confirm/prompt) — konsistent mit dem Rest der App, blockiert
+// den Haupt-Thread nicht und laesst sich (Abbrechen) folgenlos verlassen.
+function renderTripOutcomeStep(root) {
+  // GPS IMMER sofort stoppen, sobald "Trip beenden" angetippt wird — NICHT erst nach Beantwortung
+  // der Nullrunden-Frage (Abschnitt 31, Pflicht-Testfall: kein GPS-Tracking mehr, sobald der Nutzer
+  // den Beenden-Vorgang eingeleitet hat, unabhaengig davon, wie lange die Outcome-Abfrage offen
+  // bleibt). finalizeTripWithOutcome() prüft denselben watchId-Guard zusätzlich defensiv.
+  if (STATE.trip.watchId !== null) { navigator.geolocation.clearWatch(STATE.trip.watchId); STATE.trip.watchId = null; }
+  STATE.trip.gpsMode = "off";
+  root.innerHTML = "";
+  root.appendChild(UI.el("h1", {}, "🎣 Trip beenden"));
+  root.appendChild(UI.el("div", { class: "panel" }, [
+    UI.el("div", { class: "panel-label" }, "Meerforelle gefangen?"),
+    UI.el("div", { class: "btn-row" }, [
+      UI.el("button", { class: "btn btn-primary", onclick: () => renderTripCatchCountStep(root) }, "✓ Ja"),
+      UI.el("button", { class: "btn btn-secondary", onclick: () => finalizeTripWithOutcome(root, false, 0) }, "✕ Nein (Nullrunde)"),
+    ]),
+    UI.el("div", { class: "subtext" }, "Eine Nullrunde ist ein wichtiger Datenpunkt und wird genauso gespeichert wie ein Fang."),
+  ]));
+  root.appendChild(UI.el("button", { class: "btn btn-ghost", style: "margin-top:16px;", onclick: () => renderTripScreen(root) }, "← Zurück zum laufenden Trip"));
+}
+
+function renderTripCatchCountStep(root) {
+  root.innerHTML = "";
+  root.appendChild(UI.el("h1", {}, "🎣 Trip beenden"));
+  const countInput = UI.el("input", { type: "number", min: "1", value: "1" });
+  root.appendChild(UI.el("div", { class: "panel" }, [
+    UI.el("div", { class: "panel-label" }, "Wie viele Meerforellen?"),
+    countInput,
+    UI.el("div", { class: "btn-row", style: "margin-top:12px;" }, [
+      UI.el("button", { class: "btn btn-primary", onclick: () => finalizeTripWithOutcome(root, true, Math.max(1, parseInt(countInput.value || "1", 10))) }, "✓ Speichern"),
+      UI.el("button", { class: "btn btn-secondary", onclick: () => renderTripOutcomeStep(root) }, "← Zurück"),
+    ]),
+  ]));
+}
+
+async function finalizeTripWithOutcome(root, caught, count) {
+  // GPS IMMER sofort stoppen, unabhaengig vom bisherigen Modus (Abschnitt 31, Pflicht-Testfall).
+  if (STATE.trip.watchId !== null) { navigator.geolocation.clearWatch(STATE.trip.watchId); STATE.trip.watchId = null; }
+  const s = STATE.trip.session;
+  s.end_time = new Date().toISOString();
+  s.duration_minutes = Math.round((new Date(s.end_time) - new Date(s.start_time)) / 60000);
+  s.date = isoToday();
+  s.day_part = currentDayPartNow();
+  s.time_precision = "exact";
+  s.species_target = s.species_target || "mefo";
+  s.result_fish_count = count;
+  s.is_blank_trip = !caught; // Nullrunden-Konvention (Abschnitt 21) — nie leer lassen
+  // PHASE 5: explizites Outcome, verbindlich (Auftrag Punkt 2) — ersetzt die bisherige implizite
+  // Ableitung "is_blank_trip = result_fish_count === 0" (die nie befuellt wurde, weil es im Trip-
+  // Screen bislang keine Fangerfassung gab) durch eine tatsaechlich abgefragte Antwort.
+  s.outcome = caught ? "catch" : "no_catch";
+  s.outcome_known = true;
+  s.source_quality = "A_own_verified";
+  s.created_at = FIDB.nowIso();
+  s.species_specific = {};
+  await FIDB.put("fishing_session", s);
+  UI.toast(`Trip gespeichert (${s.duration_minutes} Min., ${s.is_blank_trip ? "Nullrunde" : s.result_fish_count + " Fisch(e)"}). Umweltdaten werden im Hintergrund ergänzt…`, "success");
+  const finishedSession = { ...s };
+  STATE.trip = { active: false, session: null, gpsMode: "off", watchId: null, track: [] };
+  STATE.view = "angeln";
+  renderView();
+
+  // Environmental Enrichment lief fuer Trips bisher NICHT (Luecke, siehe Implementierungsbericht) —
+  // wird jetzt analog zu renderCatchForm() im Hintergrund nachgeholt, DANACH die Shadow-Auswertung
+  // (Champion bleibt sichtbar/unveraendert, Challenger nur mitgeloggt, siehe shadow.js).
+  const startTimeHHMM = new Date(finishedSession.start_time).toISOString().slice(11, 16);
+  FIEnrichment.enrich(finishedSession.water_id, finishedSession.date, finishedSession.day_part, "exact", startTimeHHMM, "fishing_session", finishedSession.session_id)
+    .then(async (snap) => {
+      finishedSession.environmental_snapshot_id = snap.snapshot_id;
+      await FIDB.put("fishing_session", finishedSession);
+      if (STATE.view === "angeln") renderView();
+      if (window.FIShadow) {
+        await window.FIShadow.recordShadowEvaluation({
+          linkedEntityType: "fishing_session", linkedEntityId: finishedSession.session_id,
+          species: finishedSession.species_target, waterId: finishedSession.water_id,
+          snapshot: snap, dateIso: finishedSession.date,
+          spotKey: finishedSession.spot_id, shoreOrBoat: finishedSession.shore_or_boat,
+          sessionDurationMinutes: finishedSession.duration_minutes,
+          outcomeKnown: true, fangJa: caught, catchCountMefo: count,
+        });
+      }
+    })
+    .catch((e) => UI.toast("Umweltdaten-Abruf im Hintergrund fehlgeschlagen: " + e.message, "error"));
 }
 
 function startFullTrack(root) {
@@ -718,26 +843,9 @@ function stopFullTrack(root) {
   renderTripScreen(root);
 }
 
-async function endTrip(root) {
-  // GPS IMMER sofort stoppen, unabhaengig vom bisherigen Modus (Abschnitt 31, Pflicht-Testfall).
-  if (STATE.trip.watchId !== null) { navigator.geolocation.clearWatch(STATE.trip.watchId); STATE.trip.watchId = null; }
-  const s = STATE.trip.session;
-  s.end_time = new Date().toISOString();
-  s.duration_minutes = Math.round((new Date(s.end_time) - new Date(s.start_time)) / 60000);
-  s.date = isoToday();
-  s.day_part = currentDayPartNow();
-  s.time_precision = "exact";
-  s.species_target = s.species_target || "unbekannt";
-  s.is_blank_trip = s.result_fish_count === 0; // Nullrunden-Konvention (Abschnitt 21) — nie leer lassen
-  s.source_quality = "A_own_verified";
-  s.created_at = FIDB.nowIso();
-  s.species_specific = {};
-  await FIDB.put("fishing_session", s);
-  UI.toast(`Trip gespeichert (${s.duration_minutes} Min., ${s.is_blank_trip ? "Nullrunde" : s.result_fish_count + " Fisch(e)"}).`, "success");
-  STATE.trip = { active: false, session: null, gpsMode: "off", watchId: null, track: [] };
-  STATE.view = "angeln";
-  renderView();
-}
+// (endTrip() wurde in Phase 5 durch renderTripOutcomeStep()/renderTripCatchCountStep()/
+// finalizeTripWithOutcome() oben ersetzt — verbindliche Nullrunden-Abfrage statt stiller
+// result_fish_count===0-Ableitung, siehe Kommentar dort.)
 
 // ---------------------------------------------------------------------------
 // VIEW: Intelligence (Voice-Workflow + Inbox) — höchste Priorität (Abschnitt 5)
@@ -1015,6 +1123,25 @@ async function enrichReportInBackground(report, waterId, draft) {
     report.enrichment_pending = false;
     await FIDB.put("intelligence_report", report);
     UI.toast(`Umweltdaten für "${report.species || report.record_type}"-Meldung: ${snap.status === "complete" ? "vollständig ergänzt" : snap.status}.`, snap.status === "failed" ? "" : "success");
+
+    // PHASE 5 (GO-Freigabe): Voice/Text-Intelligence-Meldungen liefern nicht IMMER ein
+    // zweifelsfrei explizites Outcome (is_blank_trip ist eine Extraktions-Vermutung, keine
+    // erzwungene Abfrage wie beim Trip-Ende) — daher hier bewusst KONSERVATIV: nur als bekanntes
+    // Outcome werten, wenn entweder eine Fangzahl vorliegt ODER die Meldung explizit als Nullrunde
+    // erkannt wurde. Sonst wird outcome_known=false protokolliert statt eine unsichere Vermutung
+    // als sicheres Outcome zu verkaufen (Spezifikation, offener Punkt K.6).
+    if (window.FIShadow && report.species === "mefo" && waterId === "luebecker_bucht") {
+      const hasExplicitOutcome = (report.fish_count !== null && report.fish_count !== undefined) || report.is_blank_trip === true;
+      await window.FIShadow.recordShadowEvaluation({
+        linkedEntityType: "intelligence_report", linkedEntityId: report.report_id,
+        species: report.species, waterId,
+        snapshot: snap, dateIso: report.catch_date,
+        spotKey: report.spot_id, shoreOrBoat: null, sessionDurationMinutes: null,
+        outcomeKnown: hasExplicitOutcome,
+        fangJa: hasExplicitOutcome ? ((report.fish_count || 0) > 0) : null,
+        catchCountMefo: hasExplicitOutcome ? (report.fish_count || 0) : null,
+      });
+    }
   } catch (e) {
     UI.toast("Umweltdaten-Abruf im Hintergrund fehlgeschlagen: " + e.message, "error");
   }

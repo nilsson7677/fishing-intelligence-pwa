@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v10"; // v10: Sprint 3.1 — Wasserstandsphase (MUST), experimentelles Hochstand-Fenster, Hero-/Warum-/Ausblick-Polish nach Android-Realtest
+const CACHE_NAME = "fishintel-shell-v11"; // v11: Phase 5 — Regime-STATE Shadow Pilot (GO-Freigabe 19.08.2026): challenger-state.js + shadow.js neu, rein additiv/Hintergrund, kein sichtbares UI-Verhalten geaendert
 const SHELL_FILES = [
   "./",
   "./index.html",
@@ -19,6 +19,8 @@ const SHELL_FILES = [
   "./js/registry.js",
   "./js/enrichment.js",
   "./js/meerforelle-model.js",
+  "./js/challenger-state.js",
+  "./js/shadow.js",
   "./js/speech.js",
   "./js/seed-data.js",
   "./js/ui.js",

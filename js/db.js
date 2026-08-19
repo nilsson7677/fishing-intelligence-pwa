@@ -7,7 +7,12 @@
 const DB_NAME = "fishintel_db";
 // v2 (Voice Reliability Loop Runde 2, Abschnitt 8): neuer Store "user_vocabulary" fuer
 // persoenliche Sprach-/Ortsnamen-Korrekturen des Nutzers.
-const DB_VERSION = 2;
+// v3 (Phase 5 — Regime-STATE Shadow Pilot, GO-Freigabe 19.08.2026): neuer Store
+// "shadow_evaluation" fuer den rein im Hintergrund laufenden Vergleich Champion vs.
+// CHALLENGER_STATE_V1 (siehe pwa/js/shadow.js). REIN ADDITIV: kein bestehender Store, Index
+// oder Feld wird veraendert oder entfernt. Der Champion (meerforelle-model.js) bleibt die
+// einzige Logik, die in der UI sichtbar ist — shadow_evaluation wird in keiner View gelesen.
+const DB_VERSION = 3;
 
 const STORES = {
   species: "species_id",
@@ -20,6 +25,7 @@ const STORES = {
   environmental_snapshot: "snapshot_id",
   enrichment_queue: "queue_id",
   user_vocabulary: "vocab_id",
+  shadow_evaluation: "shadow_id",
 };
 
 let _dbPromise = null;
@@ -49,6 +55,11 @@ function openDb() {
           }
           if (name === "user_vocabulary") {
             store.createIndex("by_category", "category", { unique: false });
+          }
+          if (name === "shadow_evaluation") {
+            store.createIndex("by_linked", "linked_entity_id", { unique: false });
+            store.createIndex("by_model_version", "model_version", { unique: false });
+            store.createIndex("by_created", "timestamp_created", { unique: false });
           }
         }
       }

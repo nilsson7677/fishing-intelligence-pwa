@@ -104,6 +104,52 @@ async function enrich(waterId, targetDateIso, dayPart = "unknown", timePrecision
     errors.push({ provider: "-", field: "water_level_cm", error: `Kein Pegel-Provider fuer Gewaesser '${waterId}' (dokumentierte Luecke)` });
   }
 
+  // --- Wasserstandsphase (Phase 5 — Regime-STATE Shadow Pilot, GO-Freigabe 19.08.2026) ---
+  // Persistiert das reichhaltige FIProviders.analyzeWaterLevelPhase()-Ergebnis (Phase, Rate,
+  // Hochstand-Zeitpunkt, Minuten seit Peak, Confidence), das bisher NUR ephemer im
+  // app.js-In-Memory-Cache lebte (siehe PHASE5_REGIME_STATE_SHADOW_PILOT_SPEC.md, Abschnitt 4/5.1:
+  // "die einzige der benoetigten Datenquellen, die tatsaechlich eine Persistenz-Ergaenzung
+  // braucht"). REIN PASSIVES LOGGING — dieses Feld fliesst NICHT in den Champion-Score und NICHT
+  // in einen Score-Bonus ein (kein 30-60-Min.-Bonus hier, siehe Auftrag Abschnitt 2 der GO-
+  // Freigabe: "explizit KEIN 30-60-Min-Bonus").
+  //
+  // LOOK-AHEAD-VERMEIDUNG (siehe Spezifikation, Red-Team-Tabelle "Look-ahead Bias" + offener
+  // Punkt K.8): PegelonlineProvider.getLevelSeries() liefert IMMER die AKTUELLE Live-Zeitreihe der
+  // letzten ~2 Tage, keine historische Serie relativ zu einem beliebigen targetDt. Fuer ein
+  // targetDt, das mehr als 90 Minuten von der tatsaechlichen Erfassungszeit entfernt liegt (z.B.
+  // eine rueckwirkend fuer "gestern" erfasste Sprachmeldung), wuerde eine berechnete "Phase" in
+  // Wahrheit die HEUTIGE Phase widerspiegeln, nicht die von targetDt — das waere eine
+  // irrefuehrende, fachlich falsche Aussage. In diesem Fall bleibt das Feld daher bewusst leer
+  // (waterlevel_phase_status dokumentiert den Grund), statt einen falsch zugeordneten Wert zu
+  // speichern (Kernprinzip dieser Codebasis: lieber keine Aussage als eine unbelegte). Bewusst OHNE
+  // note(...)-Aufruf hier: der bestehende Snapshot-Status/-Datenqualitaet (status/data_quality, in
+  // der UI sichtbar, siehe app.js "Details & Rohdaten") bezieht sich weiterhin ausschliesslich auf
+  // die bereits vorher bestehenden Felder — dieses rein additive Shadow-Signal darf daran nichts
+  // aendern.
+  if (profile.waterLevelProvider && profile.waterLevelStationId) {
+    const wlNowMs = Date.now();
+    const wlNearNow = Math.abs(wlNowMs - targetDt.getTime()) <= 90 * 60000;
+    if (wlNearNow) {
+      try {
+        const seriesRes = await profile.waterLevelProvider.getLevelSeries(profile.waterLevelStationId);
+        const phase = seriesRes.ok
+          ? FIProviders.analyzeWaterLevelPhase(seriesRes.raw, wlNowMs)
+          : { ok: false, reason: seriesRes.error || "Pegel-Zeitreihe nicht abrufbar" };
+        snapshot.waterlevel_phase = phase.ok ? phase.phase : null;
+        snapshot.waterlevel_rate_cm_h = phase.ok ? phase.rateCmPerHour : null;
+        snapshot.waterlevel_confidence = phase.ok ? phase.confidence : null;
+        snapshot.waterlevel_peak_time = phase.ok ? phase.peakTime : null;
+        snapshot.waterlevel_minutes_since_peak = phase.ok ? phase.minutesSincePeak : null;
+        snapshot.waterlevel_data_age_minutes = phase.ok ? phase.dataAgeMinutes : null;
+        snapshot.waterlevel_phase_status = phase.ok ? "ok" : (phase.reason || "unklar");
+      } catch (e) {
+        snapshot.waterlevel_phase_status = `Fehler bei Wasserstandsphasen-Berechnung: ${e.message}`;
+      }
+    } else {
+      snapshot.waterlevel_phase_status = "nicht berechnet — Zieldatum zu weit von der Erfassungszeit entfernt (Look-ahead-Vermeidung, siehe Kommentar)";
+    }
+  }
+
   // --- Abfluss (Trave, Sprint-2-Fund) ---
   if (profile.dischargeProvider && refLat !== null) {
     const disc = await profile.dischargeProvider.getDischarge(refLat, refLon, targetDt);
