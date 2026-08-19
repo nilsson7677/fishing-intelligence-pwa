@@ -160,6 +160,15 @@ const WEEKDAY_LONG = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag",
 function weekdayShort(d) { return WEEKDAY_SHORT[d.getUTCDay()]; }
 function weekdayLong(d) { return WEEKDAY_LONG[d.getUTCDay()]; }
 function fmtTime(d) { return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }); }
+// SPRINT 3.1 (Punkt 5, "Scheinpraezision reduzieren"): das Daemmerungsfenster ist astronomisch
+// hergeleitet, nicht fangbuch-validiert — auf 5 Minuten gerundet, um keine Minutenpraezision
+// vorzutaeuschen, die es fachlich nicht gibt. Die exakten Werte bleiben in "Details & Rohdaten"
+// erhalten (siehe dort).
+function fmtApproxTime(d) {
+  const stepMs = 5 * 60000;
+  const rounded = new Date(Math.round(d.getTime() / stepMs) * stepMs);
+  return fmtTime(rounded);
+}
 
 // SPRINT 3 — "bestes Zeitfenster" als konkretes Fenster statt zweier Einzelzeiten: 60 Minuten vor
 // Sonnenuntergang bis 60 Minuten nach Ende der buergerlichen Daemmerung. Keine neue Behauptung —
@@ -204,6 +213,32 @@ async function ensureForecastDaily(waterId, lat, lon, startDt, days, maxAgeMs = 
   return result;
 }
 
+// SPRINT 3.1 — Wasserstandsphase (MUST). Live-Abruf der vollen Pegel-Rohzeitreihe ("jetzt", nicht
+// auf einen Meldungs-Zieldatum aggregiert — siehe Kommentar bei PegelonlineProvider.getLevelSeries
+// in providers.js), analog zu ensureForecastDaily() als kurzlebiger In-Memory-Cache (kein neuer
+// IndexedDB-Store, reiner Anzeige-Hilfswert). Liefert IMMER ein FIProviders.analyzeWaterLevelPhase-
+// Ergebnisobjekt zurueck (ok:false mit reason, wenn kein Provider/keine Station/offline/zu wenig
+// Daten) — nie eine erfundene Phase.
+let _waterLevelCache = null; // { waterId, fetchedAt, result }
+async function ensureWaterLevelPhase(waterId, maxAgeMs = 20 * 60 * 1000) {
+  if (_waterLevelCache && _waterLevelCache.waterId === waterId && (Date.now() - _waterLevelCache.fetchedAt) < maxAgeMs) {
+    return _waterLevelCache.result;
+  }
+  const profile = FIRegistry.getProfile(waterId);
+  if (!profile.waterLevelProvider || !profile.waterLevelStationId) {
+    return { ok: false, reason: `Kein Pegel-Provider fuer Gewässer '${waterId}' hinterlegt` };
+  }
+  if (!navigator.onLine) {
+    return _waterLevelCache?.result || { ok: false, reason: "Offline — keine aktuelle Pegel-Zeitreihe abrufbar" };
+  }
+  const seriesRes = await profile.waterLevelProvider.getLevelSeries(profile.waterLevelStationId);
+  const result = seriesRes.ok
+    ? FIProviders.analyzeWaterLevelPhase(seriesRes.raw, Date.now())
+    : { ok: false, reason: seriesRes.error || "Pegel-Abruf fehlgeschlagen" };
+  _waterLevelCache = { waterId, fetchedAt: Date.now(), result };
+  return result;
+}
+
 function confLabelDe(tier) { return { hoch: "Hoch", mittel: "Mittel", niedrig: "Niedrig" }[tier] || "Niedrig"; }
 function tierColor(label) {
   const cls = FIMefoModel.labelChipClass(label);
@@ -226,6 +261,7 @@ async function buildMefoCopilotPanels() {
   const [refLat, refLon] = FIRegistry.WATER_REFERENCE_POINTS[waterId];
 
   const snap = await ensureFreshSnapshot(waterId, dayPart);
+  const waterPhase = await ensureWaterLevelPhase(waterId); // SPRINT 3.1 MUST
 
   const rankedSpots = FIMefoModel.rankSpots();
   const topSpot = rankedSpots[0] || null;
@@ -256,7 +292,18 @@ async function buildMefoCopilotPanels() {
 
   const todayEntry = dayEntries[0];
   const nochBesser = FIMefoModel.pickNochBesser(todayEntry, dayEntries.slice(1));
-  const warumReasons = FIMefoModel.buildWarumReasons(today.getUTCMonth() + 1, todayEntry.wassertemp, todayEntry.tFactor, topSpot);
+  const waterLevelCandidate = FIMefoModel.waterLevelWarumCandidate(waterPhase); // SPRINT 3.1
+  const expWindow = FIMefoModel.experimentalPostPeakWindow(waterPhase); // SPRINT 3.1 — Hypothese, getrennt von der Messung
+  const warumReasons = FIMefoModel.buildWarumReasons(
+    today.getUTCMonth() + 1, todayEntry.wassertemp, todayEntry.tFactor, topSpot, waterLevelCandidate);
+
+  // SPRINT 3.1 (Punkt 7): "beste Aussicht der naechsten Tage" — bewusst GETRENNT von pickNochBesser
+  // (das ist nur eine SCHWELLENWERT-gebundene, deutliche Verbesserung gegenueber heute). Hier: rein
+  // deskriptiv der beste Tag unter Tag+1..Tag+4, unabhaengig davon, ob er die Noch-besser-Schwelle
+  // reisst — kann also auch bei insgesamt schwacher Woche der "am wenigsten schlechte" Tag sein.
+  const futureDays = dayEntries.slice(1);
+  const bestOutlook = futureDays.reduce((best, d) =>
+    (d.index !== null && (best === null || d.index > best.index) ? d : best), null);
 
   const wrap = UI.el("div", {});
 
@@ -270,8 +317,11 @@ async function buildMefoCopilotPanels() {
     ev.currentTarget.textContent = indexReveal.classList.contains("hidden") ? "Index anzeigen ⓘ" : "Index ausblenden";
   } }, "Index anzeigen ⓘ");
 
+  // SPRINT 3.1 (Punkt 5): "ca."-Zeitspanne statt exakter Minutenangabe — das Fenster ist
+  // astronomisch abgeleitet (Daemmerung), nicht aus dem Fangbuch als exaktes Beissfenster
+  // validiert. Exakte Werte bleiben in "Details & Rohdaten" (siehe dort).
   const heroTimeLine = todayEntry.duskWindow
-    ? `${fmtTime(todayEntry.duskWindow.start)} – ${fmtTime(todayEntry.duskWindow.end)} (Abenddämmerung)`
+    ? `Abendfenster · ca. ${fmtApproxTime(todayEntry.duskWindow.start)}–${fmtApproxTime(todayEntry.duskWindow.end)}`
     : "Zeitfenster nicht berechenbar (Umweltdaten aktualisieren)";
 
   const confDots = (tier) => {
@@ -279,18 +329,48 @@ async function buildMefoCopilotPanels() {
     return UI.el("div", { class: "confidence-dots" }, [1, 2, 3].map((i) => UI.el("span", { class: i <= n ? "on" : "" })));
   };
 
+  // SPRINT 3.1 (Punkt 2, MUST): Wasserstandsphase-Zeile — Phase + Hochstand-Zeit/seit/Rate, ODER
+  // ehrlich "derzeit unklar" statt eines erfundenen Zustands. Punkt 3: das experimentelle
+  // Fangfenster ist eine EIGENE Zeile mit 🧪-Praefix, NIE in die Phase-Aussage selbst eingemischt.
+  const wlDetailParts = [];
+  if (waterPhase.ok) {
+    if (waterPhase.phase === "laeuft_ab" && waterPhase.peakTime) {
+      const hhmm = new Date(waterPhase.peakTime).toISOString().slice(11, 16);
+      wlDetailParts.push(`Hochstand ${hhmm}`, `seit ${waterPhase.minutesSincePeak} min`);
+    } else if (waterPhase.phase === "laeuft_ab") {
+      wlDetailParts.push("Zeitpunkt des letzten Hochstands nicht eindeutig bestimmbar");
+    }
+    if (waterPhase.rateCmPerHour !== null && waterPhase.phase !== "stabil") {
+      wlDetailParts.push(`${waterPhase.rateCmPerHour > 0 ? "+" : ""}${waterPhase.rateCmPerHour} cm/h`);
+    }
+  } else if (waterPhase.reason) {
+    wlDetailParts.push(waterPhase.reason);
+  }
+  const waterlevelRow = UI.el("div", { class: "waterlevel-row" }, [
+    UI.el("div", { class: "waterlevel-phase" }, `🌊 ${FIMefoModel.waterPhaseLabel(waterPhase.ok ? waterPhase.phase : null)}`),
+    wlDetailParts.length ? UI.el("div", { class: "waterlevel-detail" }, wlDetailParts.join(" · ")) : null,
+    expWindow && expWindow.active
+      ? UI.el("div", { class: "experimental-badge" }, `🧪 Experimentelles 30–60-Min.-Fenster nach Hochstand (seit ${expWindow.minutesSincePeak} min) — NICHT validiert, siehe Details`)
+      : null,
+  ]);
+
   const heroCard = UI.el("div", { class: "hero-card" }, [
     UI.el("div", { class: "hero-tag" }, "Heute"),
-    UI.el("div", { class: "hero-headline" }, `${speciesEmoji("mefo")} Meerforelle · ${topSpot ? topSpot.name : "kein historisch validierter Spot"}`),
+    UI.el("div", { class: "hero-headline" }, `${speciesEmoji("mefo")} Meerforelle`),
     UI.el("div", { class: "hero-sub" }, heroTimeLine),
     UI.el("div", { class: "hero-label-row" }, [
       UI.el("div", { class: "hero-label", style: `color:${tierColor(todayEntry.label)};` }, todayEntry.label.toUpperCase()),
     ]),
+    // SPRINT 3.1 (Punkt 4): eigene Zeile statt Teil der Headline — "Staerkste historische
+    // Spot-Option" macht explizit, dass das eine HISTORISCHE Kennzahl ist, keine Aussage ueber die
+    // heutige Eignung des Spots (siehe rankSpots-Dokumentation).
+    UI.el("div", { class: "hero-spot-line" }, `📍 Stärkste historische Spot-Option: ${topSpot ? topSpot.name : "kein historisch validierter Spot"}`),
     indexToggle, indexReveal,
     UI.el("div", { class: "confidence-row" }, [
       UI.el("span", {}, ["Confidence: ", UI.el("strong", {}, confLabelDe(todayEntry.confidenceTier))]),
       confDots(todayEntry.confidenceTier),
     ]),
+    waterlevelRow,
     UI.el("div", { class: "warum-label" }, "Warum?"),
     UI.el("ul", { class: "warum-list" }, warumReasons.map((r) =>
       UI.el("li", { class: r.ok ? "" : "warum-neg" }, `${r.ok ? "✓" : "•"} ${r.text}`))),
@@ -310,24 +390,49 @@ async function buildMefoCopilotPanels() {
   }
 
   // ---- NAECHSTE TAGE ----
+  // SPRINT 3.1 (Punkt 7): Stern markiert den Tag mit der besten Aussicht unter Tag+1..Tag+4 — rein
+  // deskriptiv, unabhaengig von der "Noch besser"-Schwelle oben (siehe bestOutlook-Berechnung).
   wrap.appendChild(UI.el("div", { class: "section-label" }, "Nächste Tage"));
-  wrap.appendChild(UI.el("div", { class: "day-strip" }, dayEntries.map((entry, i) => UI.el("div", { class: "day-chip" + (i === 0 ? " is-today" : "") }, [
-    UI.el("div", { class: "dname" + (i === 0 ? " is-today-label" : "") }, i === 0 ? `${weekdayShort(entry.date)}·heute` : weekdayShort(entry.date)),
-    UI.el("div", { class: "ddot", style: `background:${tierColor(entry.label)};` }),
-    UI.el("div", { class: "dlabel" }, entry.label.toUpperCase()),
-  ]))));
+  wrap.appendChild(UI.el("div", { class: "day-strip" }, dayEntries.map((entry, i) => {
+    const isBest = bestOutlook && entry.dayOffset === bestOutlook.dayOffset;
+    return UI.el("div", { class: "day-chip" + (i === 0 ? " is-today" : "") + (isBest ? " is-best-outlook" : "") }, [
+      UI.el("div", { class: "dname" + (i === 0 ? " is-today-label" : "") }, i === 0 ? `${weekdayShort(entry.date)}·heute` : weekdayShort(entry.date)),
+      UI.el("div", { class: "ddot", style: `background:${tierColor(entry.label)};` }),
+      UI.el("div", { class: "dlabel" }, entry.label.toUpperCase()),
+      isBest ? UI.el("div", { class: "dstar" }, "⭐") : null,
+    ]);
+  })));
+  if (bestOutlook) {
+    wrap.appendChild(UI.el("div", { class: "outlook-caption" },
+      `⭐ ${weekdayLong(bestOutlook.date)} · ${bestOutlook.label.toUpperCase()} — beste Aussicht der nächsten Tage`));
+  }
 
-  // ---- ALTERNATIVEN HEUTE (echte Rangliste, keine erfundene Alternative) ----
-  if (altSpots.length) {
+  // ---- ALTERNATIVEN HEUTE (nur bei echtem Entscheidungswert, siehe Punkt 8) ----
+  // Das Fangindex-Modell ist NICHT spot-abhaengig (nur Saison × Wassertemperatur) — alle Spots
+  // teilen sich daher IMMER dasselbe Tages-Label. "Alternativen" mit demselben Label wie der Hero
+  // erneut anzuzeigen, taeuscht eine Differenzierung vor, die es fachlich nicht gibt. Ist der
+  // heutige Tag insgesamt schwach, ist "noch ein schwacher Spot" kein Mehrwert — stattdessen wird
+  // die naechste tatsaechlich bessere Gelegenheit hervorgehoben (kein Alternativen-Panel nur, weil
+  // die Daten technisch verfuegbar sind).
+  // "Unbekannt" (Index nicht berechenbar, z.B. keine Wassertemperatur) gehoert ebenfalls zur
+  // Gating-Bedingung: ohne heutige Bewertung wirken "Alternativen" wie eine vorgetaeuschte
+  // Differenzierung — die Hero-Karte kommuniziert die fehlende Datenlage bereits ehrlich.
+  const showAlternatives = todayEntry.label !== "Schwach" && todayEntry.label !== "Unbekannt" && altSpots.length > 0;
+  if (showAlternatives) {
     wrap.appendChild(UI.el("div", { class: "section-label" }, "Alternativen heute"));
-    wrap.appendChild(UI.el("div", { class: "alt-row" }, altSpots.map((sp) => {
-      const altConf = FIMefoModel.combineConfidenceTier(todayEntry.envTier, sp.confidenceTier);
-      return UI.el("div", { class: "alt-card" }, [
+    wrap.appendChild(UI.el("div", { class: "alt-row" }, altSpots.map((sp) =>
+      UI.el("div", { class: "alt-card" }, [
         UI.el("div", { class: "alt-name" }, sp.name),
-        UI.el("div", { class: "alt-label", style: `color:${tierColor(todayEntry.label)};` }, todayEntry.label.toUpperCase()),
-        UI.el("div", { class: "alt-conf" }, `Confidence: ${confLabelDe(altConf)}`),
-      ]);
-    })));
+        UI.el("div", { class: "alt-label" }, `${Math.round(sp.shrunkRate * 100)}% historisch`),
+        UI.el("div", { class: "alt-conf" }, `Confidence: ${confLabelDe(sp.confidenceTier)}`),
+      ])
+    )));
+  } else if (todayEntry.label === "Schwach") {
+    const better = bestOutlook && FIMefoModel.labelRank(bestOutlook.label) > FIMefoModel.labelRank(todayEntry.label) ? bestOutlook : null;
+    wrap.appendChild(UI.el("div", { class: "next-better-block" },
+      better
+        ? ["Heute insgesamt schwach. ", UI.el("strong", {}, `⭐ Nächste bessere Aussicht: ${weekdayLong(better.date)} (${better.label.toUpperCase()})`)]
+        : "Heute insgesamt schwach — auch die nächsten Tage zeigen aktuell keine klar bessere Gelegenheit."));
   }
 
   // ---- DETAILS & ROHDATEN (eingeklappt: bisheriges Strategie-/Bedingungen-Panel + Spot-Rangliste) ----
@@ -343,15 +448,29 @@ async function buildMefoCopilotPanels() {
       UI.el("div", { class: "quality-grid", style: "grid-template-columns:1fr 1fr;font-size:13px;" }, [
         UI.el("div", {}, `Lufttemp.: ${UI.fmtProvValue(snap?.air_temp_c)}`),
         UI.el("div", {}, `Wind: ${UI.fmtProvValue(snap?.wind_dir_deg, 0)}° / ${UI.fmtProvValue(snap?.wind_speed_bft, 0)} Bft`),
-        UI.el("div", {}, `Pegel: ${UI.fmtProvValue(snap?.water_level_cm, 0)}`),
+        UI.el("div", {}, `Pegel (absolut): ${UI.fmtProvValue(snap?.water_level_cm, 0)}`),
         UI.el("div", {}, `Wassertemp.: ${UI.fmtProvValue(snap?.water_temp_c)}`),
       ]),
+      // SPRINT 3.1 (Punkt 2/9): Wasserstandstrend als eigene, tiefere Detailzeile — der absolute
+      // Pegel bleibt (oben), die Phase/Rate/Datenalter kommen zusaetzlich dazu, nicht anstelle.
+      UI.el("div", { class: "subtext" },
+        waterPhase.ok
+          ? `Wasserstandstrend: ${FIMefoModel.waterPhaseLabel(waterPhase.phase)}` +
+            (waterPhase.rateCmPerHour !== null ? ` (${waterPhase.rateCmPerHour > 0 ? "+" : ""}${waterPhase.rateCmPerHour} cm/h)` : "") +
+            ` · Confidence: ${confLabelDe(waterPhase.confidence)} · Datenalter: ${waterPhase.dataAgeMinutes} min`
+          : `Wasserstandstrend: unklar${waterPhase.reason ? ` (${waterPhase.reason})` : ""}`),
+      todayEntry.duskWindow
+        ? UI.el("div", { class: "subtext" },
+          `Zeitfenster (exakt, astronomisch): ${fmtTime(todayEntry.duskWindow.start)}–${fmtTime(todayEntry.duskWindow.end)} (60min vor Sonnenuntergang bis 60min nach Ende bürgerliche Dämmerung)`)
+        : null,
       snap ? UI.el("div", { class: "subtext", html: `Status: ${UI.statusChip(snap.status)} · Datenqualität: ${snap.data_quality}` }) : null,
     ]),
     UI.el("div", { class: "panel" }, [
-      UI.el("div", { class: "panel-label" }, "Spot-Rangliste (historisch, Lübecker Bucht)"),
+      // SPRINT 3.1 (Punkt 9): einfachere Sprache — Methodik (Shrinkage etc.) bleibt in
+      // docs/audit_fangindex_v1.md dokumentiert, hier nur noch die fuer den Angler relevante Aussage.
+      UI.el("div", { class: "panel-label" }, "Historische Spot-Stärke"),
       UI.el("div", { class: "subtext" },
-        "Historical Spot Strength: reine, shrinkage-korrigierte Fangbuch-Quote je Spot — KEINE tagesaktuelle Wetter-/Bedingungs-Interaktion unterstellt. Die Rangfolge ändert sich bewusst nicht von Tag zu Tag (siehe Phase 2.5)."),
+        "Rangfolge aus deinem Fangbuch. Aktuelle Wetterbedingungen verändern diese Rangfolge derzeit noch nicht."),
       UI.el("ul", { class: "warum-list", style: "padding-left:16px;" }, rankedSpots.slice(0, 6).map((sp) =>
         UI.el("li", {}, `${sp.name}: ${Math.round(sp.shrunkRate * 100)}% (n=${sp.n}, Confidence: ${confLabelDe(sp.confidenceTier)})`))),
     ]),

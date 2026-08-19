@@ -177,28 +177,99 @@ function rankSpots(limit = null) {
 // fuer direkten Monats-Lookup), um die Doppel-Deklaration/den SyntaxError zu vermeiden.
 const MEFO_MONTH_NAMES = ["", "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
   "September", "Oktober", "November", "Dezember"];
-function buildWarumReasons(month, wassertemp, tFactorVal, topSpot) {
-  const reasons = [];
+// SPRINT 3.1 (Punkt 6, "Warum staerker auf Anglerentscheidung ausrichten"): jeder Kandidatengrund
+// bekommt jetzt zusaetzlich ein WEIGHT (0..1, "wie entscheidungsrelevant ist dieses Signal gerade
+// jetzt"), und die Liste wird danach absteigend sortiert und auf maximal 4 Eintraege gekappt. Das
+// ersetzt die bisher IMMER gleiche Reihenfolge (Saison, dann Wassertemp., dann Spot) durch eine
+// dynamische Priorisierung — ein besonders extremes/entscheidungsrelevantes Signal (z.B. eine
+// Sommer-Flaute, eine weit ausserhalb liegende Wassertemperatur, oder — neu — eine gerade sehr
+// aussagekraeftige Wasserstandsphase) rueckt nach vorn, ein eher neutrales/erwartbares Signal
+// (z.B. "Saison solide", "Wassertemperatur brauchbar") tritt zurueck. Die Gewichte sind eine
+// bewusste, dokumentierte Setzung (kein statistisches Modell) — analog zu den LABEL_TIERS oben.
+function buildWarumReasons(month, wassertemp, tFactorVal, topSpot, waterLevelCandidate) {
+  const candidates = [];
   const sVal = sFactor(month);
-  if (sVal >= 1.0) reasons.push({ ok: true, text: `Saison aktuell stark (${MEFO_MONTH_NAMES[month]})` });
-  else if (sVal >= 0.7) reasons.push({ ok: true, text: `Saison aktuell solide (${MEFO_MONTH_NAMES[month]})` });
-  else reasons.push({ ok: false, text: `Saison aktuell eher schwach (${MEFO_MONTH_NAMES[month]})` });
+  if (sVal >= 1.0) candidates.push({ ok: true, text: `Saison aktuell stark (${MEFO_MONTH_NAMES[month]})`, weight: 0.65 });
+  else if (sVal >= 0.7) candidates.push({ ok: true, text: `Saison aktuell solide (${MEFO_MONTH_NAMES[month]})`, weight: 0.3 });
+  else candidates.push({ ok: false, text: `Saison aktuell eher schwach (${MEFO_MONTH_NAMES[month]})`, weight: sVal <= 0.4 ? 0.6 : 0.45 });
 
   if (wassertemp === null || wassertemp === undefined || tFactorVal === null) {
-    reasons.push({ ok: false, text: "Keine aktuelle Wassertemperatur verfügbar" });
+    candidates.push({ ok: false, text: "Keine aktuelle Wassertemperatur verfügbar", weight: 0.75 });
   } else if (tFactorVal >= 0.85) {
-    reasons.push({ ok: true, text: `Wassertemperatur im optimalen Bereich (${wassertemp.toFixed(1)} °C)` });
+    candidates.push({ ok: true, text: `Wassertemperatur im optimalen Bereich (${wassertemp.toFixed(1)} °C)`, weight: 0.7 });
   } else if (tFactorVal >= 0.5) {
-    reasons.push({ ok: true, text: `Wassertemperatur im brauchbaren Bereich (${wassertemp.toFixed(1)} °C)` });
+    candidates.push({ ok: true, text: `Wassertemperatur im brauchbaren Bereich (${wassertemp.toFixed(1)} °C)`, weight: 0.3 });
   } else {
-    reasons.push({ ok: false, text: `Wassertemperatur außerhalb des optimalen Bereichs (${wassertemp.toFixed(1)} °C)` });
+    candidates.push({ ok: false, text: `Wassertemperatur außerhalb des optimalen Bereichs (${wassertemp.toFixed(1)} °C)`, weight: 0.65 });
   }
 
   if (topSpot) {
-    reasons.push({ ok: true, text: `${topSpot.name} historisch überdurchschnittlich ` +
-      `(${Math.round(topSpot.shrunkRate * 100)} %, n=${topSpot.n})` });
+    candidates.push({ ok: true, text: `${topSpot.name} historisch überdurchschnittlich ` +
+      `(${Math.round(topSpot.shrunkRate * 100)} %, n=${topSpot.n})`, weight: 0.45 });
   }
-  return reasons;
+
+  // NEU Sprint 3.1: Wasserstandsphase als weiterer, dynamisch gewichteter Warum-Kandidat (siehe
+  // waterLevelWarumCandidate() unten). Optional — nur wenn ein Ergebnis uebergeben wurde (z.B.
+  // kein Pegel-Provider fuer dieses Gewaesser, oder noch nicht geladen).
+  if (waterLevelCandidate) candidates.push(waterLevelCandidate);
+
+  candidates.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+  return candidates.slice(0, 4);
+}
+
+// SPRINT 3.1 (Punkt 3, "Experimentelles Fangfenster nach Hoechststand"): trennt strikt die
+// GEMESSENE Tatsache (Wasserstandsphase, siehe FIProviders.analyzeWaterLevelPhase) von der NOCH
+// NICHT validierten Anglerhypothese ("30-60 Minuten nach Hochstand koennte interessant sein").
+// Nur ein aktiver, gut genug abgesicherter "laeuft_ab"-Zustand mit bekanntem Hochstand-Zeitpunkt
+// und Confidence != niedrig darf ueberhaupt als "im experimentellen Fenster" markiert werden — bei
+// unsicherer Datenlage lieber gar keine Aussage als eine unbelegte. Gibt NIE eine Aussage wie
+// "optimale Beisszeit" zurueck (siehe Aufruf-Stellen in app.js) — nur "befinden wir uns aktuell in
+// dem experimentellen 30-60-Minuten-Fenster, ja/nein".
+function experimentalPostPeakWindow(phase) {
+  if (!phase || !phase.ok || phase.phase !== "laeuft_ab" || phase.minutesSincePeak === null || phase.minutesSincePeak === undefined) return null;
+  if (phase.confidence === "niedrig") return null;
+  return { active: phase.minutesSincePeak >= 30 && phase.minutesSincePeak <= 60, minutesSincePeak: phase.minutesSincePeak };
+}
+
+const WATER_PHASE_TEXT = {
+  steigt: "Wasser steigt",
+  naehert_sich_hochstand: "Wasser nähert sich dem Hochstand",
+  hochstand: "Hochstand / Wendepunkt",
+  laeuft_ab: "Wasser läuft ab",
+  stabil: "Wasserstand weitgehend stabil",
+};
+function waterPhaseLabel(phaseKey) { return WATER_PHASE_TEXT[phaseKey] || "Wasserstandsphase derzeit unklar"; }
+
+// Wandelt ein FIProviders.analyzeWaterLevelPhase()-Ergebnis in einen Warum-Kandidaten um (siehe
+// buildWarumReasons oben). Bewusst in meerforelle-model.js (nicht providers.js): die
+// Phasen-ERKENNUNG ist gewaesser-generisch, die Einschaetzung "wie wichtig ist das gerade fuer
+// eine Meerforellen-Entscheidung" ist modell-/artspezifisch.
+function waterLevelWarumCandidate(phase) {
+  if (!phase || !phase.ok || !phase.phase) {
+    const suffix = phase && phase.reason ? ` (${phase.reason})` : "";
+    return { ok: false, text: `Wasserstandsphase derzeit unklar${suffix}`, weight: 0.5 };
+  }
+  const expWindow = experimentalPostPeakWindow(phase);
+  let text = `🌊 ${waterPhaseLabel(phase.phase)}`;
+  const parts = [];
+  if (phase.phase === "laeuft_ab" && phase.peakTime) {
+    const hhmm = new Date(phase.peakTime).toISOString().slice(11, 16);
+    parts.push(`Hochstand ${hhmm} Uhr`, `seit ${phase.minutesSincePeak} min`);
+  }
+  if (phase.rateCmPerHour !== null && phase.phase !== "stabil") {
+    parts.push(`${phase.rateCmPerHour > 0 ? "+" : ""}${phase.rateCmPerHour} cm/h`);
+  }
+  if (parts.length) text += ` · ${parts.join(" · ")}`;
+  if (expWindow && expWindow.active) text += " · 🧪 experimentelles 30–60-Min.-Fenster nach Hochstand";
+
+  // Gewichtung: eine klare, gerade jetzt entscheidungsrelevante Phase (laeuft ab, insbesondere im
+  // experimentellen Fenster) wird hoch priorisiert; "stabil" ist informativ, aber selten der
+  // wichtigste Treiber und bekommt daher ein niedrigeres Grundgewicht.
+  let weight = phase.phase === "stabil" ? 0.25 : phase.phase === "hochstand" ? 0.55 : 0.5;
+  if (expWindow && expWindow.active) weight = 0.9; // hypothesenrelevantes Fenster — bewusst hoch, aber NIE als "optimal" formuliert
+  if (phase.confidence === "niedrig") weight *= 0.6;
+
+  return { ok: true, text, weight };
 }
 
 // "Noch besser"-Regel (Sprint-3-UX-Gate, Punkt 1) — dokumentiert, nachvollziehbar, konservativ:
@@ -225,4 +296,5 @@ function pickNochBesser(todayEntry, futureDays) {
 window.FIMefoModel = { POPULATION_MEAN, SHRINKAGE_K, SPOT_STATS, sFactor, tFactor,
   basisFangchance, confidenceLabel, spotMatch, strategieHinweis,
   labelForIndex, labelRank, labelChipClass, spotConfidenceTier, combineConfidenceTier,
-  forecastEnvTier, rankSpots, buildWarumReasons, pickNochBesser };
+  forecastEnvTier, rankSpots, buildWarumReasons, pickNochBesser,
+  experimentalPostPeakWindow, waterLevelWarumCandidate, waterPhaseLabel };

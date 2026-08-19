@@ -157,8 +157,23 @@ body.is-offline .view-root { padding-top: calc(40px + var(--safe-top)); }
 .hero-tag { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--accent-green); font-weight: 700; margin-bottom: 8px; }
 .hero-headline { font-size: 19px; font-weight: 700; margin-bottom: 2px; }
 .hero-sub { font-size: 13.5px; color: var(--text-dim); margin-bottom: 14px; }
-.hero-label-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.hero-label-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
 .hero-label { font-size: 26px; font-weight: 800; }
+/* SPRINT 3.1: die historisch staerkste Spot-Option ist jetzt eine eigene Zeile, getrennt vom
+   Tages-Label — verhindert, dass "Meerforelle · Pelzerhaken" als Aussage ueber HEUTIGE Eignung
+   des Spots gelesen wird (siehe SPRINT3_1_WATERLEVEL_POLISH.md, Punkt 4). */
+.hero-spot-line { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; }
+/* SPRINT 3.1: Wasserstandsphase-Zeile im Hero (Punkt 2, MUST) — zwei Zeilen: Phase (gross genug
+   zum schnellen Scannen) + Detail (Hochstand-Zeit/seit/Rate oder "unklar"-Begruendung). */
+.waterlevel-row { padding: 8px 12px; background: rgba(255,255,255,.03); border: 1px solid var(--panel-border);
+  border-radius: 10px; margin-bottom: 10px; }
+.waterlevel-phase { font-size: 14px; font-weight: 700; }
+.waterlevel-detail { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+/* SPRINT 3.1 (Punkt 3): das experimentelle Fangfenster ist bewusst ANDERS gestylt als die
+   gemessene Wasserstandsphase (gestrichelter Rahmen statt durchgezogen, eigenes 🧪-Praefix im
+   Text) — visuell erkennbar als Hypothese, nicht als validierte Aussage. */
+.experimental-badge { font-size: 11.5px; color: var(--accent-yellow); border: 1px dashed #6b5a1a;
+  border-radius: 8px; padding: 4px 8px; margin-top: 6px; display: inline-block; }
 .confidence-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: rgba(255,255,255,.03); border: 1px solid var(--panel-border); border-radius: 10px; margin-bottom: 14px; font-size: 13px; }
 .confidence-dots { display: flex; gap: 3px; margin-left: auto; }
 .confidence-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--panel-border); }
@@ -184,12 +199,24 @@ body.is-offline .view-root { padding-top: calc(40px + var(--safe-top)); }
 .day-chip .dname.is-today-label { color: var(--accent-blue); font-weight: 700; }
 .day-chip .ddot { width: 8px; height: 8px; border-radius: 50%; margin: 3px auto; }
 .day-chip .dlabel { font-size: 9px; font-weight: 700; line-height: 1.3; }
+/* SPRINT 3.1 (Punkt 7): Stern-Marker fuer den Tag mit der besten Aussicht der naechsten Tage —
+   bewusst optisch schwaecher als das "Noch besser"-Banner (das bleibt die einzige PROMINENTE,
+   schwellenwert-gebundene Handlungsaufforderung; der Stern ist nur ein leiser Hinweis im Ausblick). */
+.day-chip.is-best-outlook { border-color: var(--accent-yellow); }
+.day-chip .dstar { font-size: 10px; margin-top: 2px; }
+.outlook-caption { font-size: 12px; color: var(--text-dim); margin: -6px 0 14px; }
 
 .alt-row { display: flex; gap: 10px; margin-bottom: 14px; }
 .alt-card { flex: 1; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; padding: 12px; text-align: center; }
 .alt-card .alt-name { font-size: 13.5px; font-weight: 700; margin-bottom: 4px; }
 .alt-card .alt-label { font-size: 13px; font-weight: 700; }
 .alt-card .alt-conf { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+/* SPRINT 3.1 (Punkt 8): Ersatzblock, wenn Alternativen KEINEN Entscheidungswert haben (z.B. alle
+   Spots heute gleich schwach) — zeigt stattdessen die naechste bessere Gelegenheit, statt
+   Information nur zu zeigen, weil sie technisch verfuegbar ist. */
+.next-better-block { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px;
+  padding: 12px 14px; margin-bottom: 14px; font-size: 13px; color: var(--text-dim); }
+.next-better-block strong { color: var(--text); }
 
 .details-toggle { display: flex; align-items: center; justify-content: space-between; background: var(--panel); border: 1px dashed #3a5a72; border-radius: 12px; padding: 12px 14px; font-size: 13px; color: var(--text-dim); margin-bottom: 12px; cursor: pointer; }
 .details-body.hidden { display: none; }

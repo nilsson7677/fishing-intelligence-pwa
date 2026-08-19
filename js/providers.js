@@ -300,6 +300,19 @@ class PegelonlineProvider {
     }
   }
 
+  // SPRINT 3.1: rohe Zeitreihe (Zeitstempel+Wert) fuer die Wasserstandsphasen-Erkennung
+  // (analyzeWaterLevelPhase, siehe unten). Bewusst getrennt von getLevel()/getTrendMultiWindow()
+  // (die liefern nur EINEN Zeitpunkt bzw. einzelne Delta-Werte relativ zu einem Zieldatum, z.B.
+  // fuer historische Fangmeldungen) — die Phasen-Erkennung braucht die VOLLE juengste Zeitreihe
+  // fuer "jetzt", unabhaengig vom Zieldatum einer Meldung.
+  async getLevelSeries(stationId, windowIso = "P2D") {
+    const uuid = PEGEL_STATIONS[stationId];
+    if (!uuid) return { ok: false, error: `Keine Pegel-Station fuer '${stationId}' bekannt` };
+    const res = await this._fetchMeasurements(uuid, windowIso);
+    if (!res.ok) return { ok: false, error: res.error, station_or_gridpoint: stationId };
+    return { ok: true, raw: res.data, station_or_gridpoint: `Pegel ${stationId}` };
+  }
+
   // Trend (Abschnitt 16): Delta zu 6/12/24h zuvor, aus derselben 2-Tage-Zeitreihe berechnet
   // (kein zusaetzlicher API-Aufruf noetig).
   async getTrendMultiWindow(stationId, dt, hoursBackList = [6, 12, 24]) {
@@ -324,6 +337,225 @@ class PegelonlineProvider {
     }
     return out;
   }
+}
+
+// ---------------------------------------------------------------------------
+// SPRINT 3.1 — Wasserstandsphase statt nacktem Pegelwert (MUST, siehe Auftrag "ABLAUFENDES WASSER
+// NACH DEM HOECHSTSTAND IST EIN MUST"). Ein absoluter Pegelwert ("512 cm") ist fuer die
+// Angelentscheidung fast wertlos — entscheidend ist, ob das Wasser steigt/faellt/gerade den
+// Hochstand erreicht hat, und seit wann.
+//
+// Bewusst NICHT "aus zwei Messpunkten voreilig einen Hochstand konstruieren" (explizite Vorgabe).
+// Der folgende Ansatz ist eine dokumentierte, konservative Heuristik — KEINE neue Forschung/
+// Validierung, sondern ein nachvollziehbares Verfahren mit expliziten Schwellenwerten:
+//
+//   1) INTERPOLATION AUF EIN GLEICHMAESSIGES RASTER (10-Minuten-Schritte): Pegelonline liefert
+//      Messwerte in unregelmaessigen Abstaenden. Zwischen zwei Rohmesswerten wird linear
+//      interpoliert — ABER nur, wenn die Luecke <= 40 Minuten ist. Groessere Luecken werden NICHT
+//      ueberbrueckt (Raster bleibt an der Stelle "unbekannt"), um keine Daten zu erfinden.
+//   2) GLAETTUNG (gleitender Durchschnitt ueber 3 Rasterpunkte = +/-10 Minuten): reduziert
+//      Messrauschen, BEVOR nach einem lokalen Hochstand gesucht wird — verhindert, dass ein
+//      einzelner Ausreisser als "Hochstand" missverstanden wird.
+//   3) TREND ("Rate") wird per linearer Regression ueber ein 45-Minuten-Fenster berechnet (nicht
+//      nur die letzten zwei Punkte) — robuster gegen einzelne verrauschte Messwerte. Ein
+//      zusaetzliches VORHERIGES 45-Minuten-Fenster erlaubt zu erkennen, ob ein Anstieg gerade
+//      nachlaesst ("naehert sich dem Hochstand").
+//   4) RAUSCHBAND (+/-1,2 cm/h): Aenderungsraten innerhalb dieses Bands gelten als "stabil", nicht
+//      als Trend — verhindert, dass normales Messrauschen als Steigen/Fallen interpretiert wird.
+//   5) EIN LOKALER HOCHSTAND wird nur akzeptiert, wenn (a) er ueber MINDESTENS 30 Minuten Anstieg
+//      davor UND 30 Minuten Rueckgang danach bestaetigt ist (Mindestdauer einer Trendaenderung,
+//      explizit gefordert), UND (b) er die Umgebung um mindestens 1,0 cm ueberragt (Prominenz —
+//      schliesst reines Rauschen aus). Nur Hochstaende der letzten 8 Stunden werden ueberhaupt als
+//      "der" relevante Hochstand betrachtet (ein Hochstand von vorgestern ist fuer die heutige
+//      Angelentscheidung nicht mehr aussagekraeftig).
+//   6) DATENALTER: sind die juengsten Messwerte aelter als 90 Minuten, wird KEINE aktuelle Phase
+//      behauptet (ok:false, "Wasserstandsphase derzeit unklar").
+//   7) MINDEST-ZEITREIHE: unter 4 Stunden Historie oder unter 4 Rohmesswerten wird ebenfalls KEINE
+//      Phase behauptet — zu wenig Grundlage fuer einen robusten Trend.
+//   8) CONFIDENCE (hoch/mittel/niedrig) wird konservativ abgewertet bei: Datenalter > 30 min,
+//      Luecken im Analysefenster, einer Rate nahe am Rauschband, oder einem gesuchten aber nicht
+//      gefundenen Hochstand-Zeitpunkt.
+//
+// Das ist bewusst eine grobe, transparente Heuristik statt eines Signalverarbeitungs-Overkills —
+// im Zweifel lieber "unklar" als eine erfundene Praezision (Kernprinzip, siehe Abschnitt 34).
+// ---------------------------------------------------------------------------
+
+const WL_GRID_STEP_MIN = 10;
+const WL_MAX_INTERP_GAP_MIN = 40;
+const WL_SMOOTH_HALFWIDTH_STEPS = 1;
+const WL_SLOPE_WINDOW_MIN = 45;
+const WL_PRIOR_WINDOW_MIN = 45;
+const WL_EPSILON_CM_H = 1.2;
+const WL_MIN_POINTS_FOR_SLOPE = 3;
+const WL_MAX_DATA_AGE_MIN = 90;
+const WL_MIN_HISTORY_HOURS = 4;
+const WL_PEAK_LOOKBACK_HOURS = 8;
+const WL_PEAK_MIN_PROMINENCE_CM = 1.0;
+const WL_PEAK_MIN_FLANK_MIN = 30;
+
+function _wlBuildGrid(points, nowMs) {
+  if (!points.length) return [];
+  const tMin = points[0].t, tMax = Math.min(points[points.length - 1].t, nowMs);
+  const grid = [];
+  for (let t = tMin; t <= tMax; t += WL_GRID_STEP_MIN * 60000) {
+    let before = null, after = null;
+    for (const p of points) {
+      if (p.t <= t) before = p;
+      if (p.t >= t && after === null) after = p;
+    }
+    if (!before || !after) { grid.push({ t, v: null }); continue; }
+    if (before === after || after.t === before.t) { grid.push({ t, v: before.v }); continue; }
+    const gapMin = (after.t - before.t) / 60000;
+    if (gapMin > WL_MAX_INTERP_GAP_MIN) { grid.push({ t, v: null }); continue; }
+    const frac = (t - before.t) / (after.t - before.t);
+    grid.push({ t, v: before.v + frac * (after.v - before.v) });
+  }
+  return grid;
+}
+
+function _wlSmooth(grid) {
+  return grid.map((g, i) => {
+    const lo = Math.max(0, i - WL_SMOOTH_HALFWIDTH_STEPS), hi = Math.min(grid.length - 1, i + WL_SMOOTH_HALFWIDTH_STEPS);
+    const vals = [];
+    for (let j = lo; j <= hi; j++) if (grid[j].v !== null) vals.push(grid[j].v);
+    if (vals.length < 2) return { t: g.t, v: null };
+    return { t: g.t, v: vals.reduce((a, b) => a + b, 0) / vals.length };
+  });
+}
+
+// Kleinste-Quadrate-Steigung (cm/h) ueber die uebergebenen Punkte. null bei zu wenig Datenbasis.
+function _wlLinRegSlopeCmPerHour(points) {
+  const pts = points.filter((p) => p.v !== null);
+  if (pts.length < WL_MIN_POINTS_FOR_SLOPE) return null;
+  const t0 = pts[0].t;
+  const xs = pts.map((p) => (p.t - t0) / 3600000);
+  const ys = pts.map((p) => p.v);
+  const n = xs.length;
+  const sumX = xs.reduce((a, b) => a + b, 0), sumY = ys.reduce((a, b) => a + b, 0);
+  const sumXY = xs.reduce((a, x, i) => a + x * ys[i], 0), sumXX = xs.reduce((a, x) => a + x * x, 0);
+  const denom = n * sumXX - sumX * sumX;
+  if (Math.abs(denom) < 1e-9) return null;
+  return (n * sumXY - sumX * sumY) / denom;
+}
+
+// Juengster robuster lokaler Hochstand innerhalb der letzten WL_PEAK_LOOKBACK_HOURS. null, wenn
+// keiner die Mindestdauer-/Prominenz-Kriterien erfuellt (siehe Doku oben, Punkt 5).
+function _wlFindRecentPeak(smoothedGrid, nowMs) {
+  const lookbackMs = WL_PEAK_LOOKBACK_HOURS * 3600000;
+  const flankSteps = Math.max(1, Math.round(WL_PEAK_MIN_FLANK_MIN / WL_GRID_STEP_MIN));
+  const candidates = [];
+  for (let i = flankSteps; i < smoothedGrid.length - flankSteps; i++) {
+    const g = smoothedGrid[i];
+    if (g.v === null || (nowMs - g.t) > lookbackMs) continue;
+    let isMax = true, minBefore = Infinity, minAfter = Infinity;
+    for (let j = i - flankSteps; j < i; j++) {
+      if (smoothedGrid[j].v === null || smoothedGrid[j].v > g.v) { isMax = false; break; }
+      minBefore = Math.min(minBefore, smoothedGrid[j].v);
+    }
+    if (!isMax) continue;
+    for (let j = i + 1; j <= i + flankSteps; j++) {
+      if (smoothedGrid[j].v === null || smoothedGrid[j].v > g.v) { isMax = false; break; }
+      minAfter = Math.min(minAfter, smoothedGrid[j].v);
+    }
+    if (!isMax) continue;
+    const prominence = g.v - Math.max(minBefore, minAfter);
+    if (prominence < WL_PEAK_MIN_PROMINENCE_CM) continue;
+    candidates.push({ t: g.t, v: g.v });
+  }
+  if (!candidates.length) return null;
+  return candidates.reduce((latest, c) => (c.t > latest.t ? c : latest), candidates[0]);
+}
+
+// Haupt-Einstiegspunkt. rawMeasurements: [{timestamp, value}, ...] wie von Pegelonline
+// zurueckgegeben (dieselbe Rohform wie in getLevel()/getTrendMultiWindow() genutzt). nowMs: aktueller
+// Zeitpunkt in ms (Parameter statt Date.now(), damit die Funktion deterministisch testbar bleibt).
+function analyzeWaterLevelPhase(rawMeasurements, nowMs, opts = {}) {
+  const result = { ok: false, reason: null, phase: null, currentValueCm: null, currentMeasuredAt: null,
+    dataAgeMinutes: null, rateCmPerHour: null, peakTime: null, peakValueCm: null, minutesSincePeak: null,
+    confidence: null };
+
+  if (!Array.isArray(rawMeasurements) || !rawMeasurements.length) {
+    result.reason = "Keine Pegel-Messwerte verfügbar"; return result;
+  }
+  let points;
+  try {
+    points = rawMeasurements
+      .map((m) => ({ t: Date.parse(m.timestamp), v: parseFloat(m.value) }))
+      .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v))
+      .sort((a, b) => a.t - b.t);
+  } catch (e) { result.reason = `Parse-Fehler: ${e.message}`; return result; }
+
+  if (points.length < 4) {
+    result.reason = "Zu wenige Pegel-Messwerte für eine Trendbestimmung"; return result;
+  }
+
+  const last = points[points.length - 1];
+  const dataAgeMin = (nowMs - last.t) / 60000;
+  result.currentValueCm = Math.round(last.v * 10) / 10;
+  result.currentMeasuredAt = new Date(last.t).toISOString();
+  result.dataAgeMinutes = Math.round(dataAgeMin);
+  if (dataAgeMin > WL_MAX_DATA_AGE_MIN) {
+    result.reason = `Letzter Pegelmesswert ist ${Math.round(dataAgeMin)} min alt — zu alt für eine verlässliche aktuelle Phase`;
+    return result;
+  }
+
+  const spanHours = (last.t - points[0].t) / 3600000;
+  if (spanHours < WL_MIN_HISTORY_HOURS) {
+    result.reason = `Zeitreihe deckt nur ${spanHours.toFixed(1)}h ab — zu kurz für eine robuste Trendbestimmung (Minimum ${WL_MIN_HISTORY_HOURS}h)`;
+    return result;
+  }
+
+  const grid = _wlBuildGrid(points, nowMs);
+  const smoothed = _wlSmooth(grid);
+
+  const recentWindow = smoothed.filter((g) => g.t > nowMs - WL_SLOPE_WINDOW_MIN * 60000 && g.t <= nowMs);
+  const priorWindow = smoothed.filter((g) =>
+    g.t > nowMs - (WL_SLOPE_WINDOW_MIN + WL_PRIOR_WINDOW_MIN) * 60000 && g.t <= nowMs - WL_SLOPE_WINDOW_MIN * 60000);
+  const recentSlope = _wlLinRegSlopeCmPerHour(recentWindow);
+  const priorSlope = _wlLinRegSlopeCmPerHour(priorWindow);
+
+  if (recentSlope === null) {
+    result.reason = "Zu wenige/lückenhafte Messwerte im aktuellen Zeitfenster für eine robuste Trendbestimmung";
+    return result;
+  }
+  result.rateCmPerHour = Math.round(recentSlope * 10) / 10;
+
+  let phase;
+  if (recentSlope > WL_EPSILON_CM_H) {
+    phase = (priorSlope !== null && priorSlope > WL_EPSILON_CM_H && recentSlope < priorSlope * 0.65)
+      ? "naehert_sich_hochstand" : "steigt";
+  } else if (recentSlope < -WL_EPSILON_CM_H) {
+    phase = "laeuft_ab";
+  } else {
+    phase = (priorSlope !== null && priorSlope > WL_EPSILON_CM_H) ? "hochstand" : "stabil";
+  }
+  result.phase = phase;
+
+  if (phase === "laeuft_ab" || phase === "hochstand" || phase === "naehert_sich_hochstand") {
+    const peak = _wlFindRecentPeak(smoothed, nowMs);
+    if (peak) {
+      result.peakTime = new Date(peak.t).toISOString();
+      result.peakValueCm = Math.round(peak.v * 10) / 10;
+      result.minutesSincePeak = Math.max(0, Math.round((nowMs - peak.t) / 60000));
+    }
+  }
+
+  let confSteps = 2; // 0=niedrig, 1=mittel, 2=hoch
+  if (dataAgeMin > 30) confSteps -= 1;
+  const hasGapsInAnalysisWindow = recentWindow.some((g) => g.v === null) ||
+    smoothed.some((g) => g.v === null && (nowMs - g.t) <= WL_PEAK_LOOKBACK_HOURS * 3600000 && g.t <= nowMs);
+  if (hasGapsInAnalysisWindow) confSteps -= 1;
+  // Naehe zur Rauschschwelle macht nur eine GERICHTETE Klassifikation (steigt/laeuft ab/naehert
+  // sich) unsicherer — "stabil" und "hochstand" sind per Definition nahe Null und duerfen dafuer
+  // nicht abgewertet werden (sonst waere die haeufigste/eindeutigste Phase systematisch die
+  // unsicherste).
+  if (phase !== "stabil" && phase !== "hochstand" && Math.abs(recentSlope) < WL_EPSILON_CM_H * 1.5) confSteps -= 1;
+  if ((phase === "laeuft_ab" || phase === "naehert_sich_hochstand") && !result.peakTime) confSteps -= 1;
+  confSteps = Math.max(0, Math.min(2, confSteps));
+  result.confidence = ["niedrig", "mittel", "hoch"][confSteps];
+
+  result.ok = true;
+  return result;
 }
 
 // NEU in Sprint 2 (Abschnitt 19): Open-Meteo Flood API (GloFAS) — Abfluss fuer die Trave.
@@ -351,5 +583,5 @@ class OpenMeteoFloodProvider {
 
 window.FIProviders = {
   OpenMeteoProvider, OpenMeteoMarineProvider, NoWaterTempProvider, PegelonlineProvider,
-  OpenMeteoFloodProvider, PEGEL_STATIONS, bft,
+  OpenMeteoFloodProvider, PEGEL_STATIONS, bft, analyzeWaterLevelPhase,
 };
