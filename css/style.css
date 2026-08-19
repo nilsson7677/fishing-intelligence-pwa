@@ -144,6 +144,56 @@ body.is-offline .view-root { padding-top: calc(40px + var(--safe-top)); }
 
 .uncalibrated-box { background: var(--panel); border: 1px dashed #3a5a72; padding: 16px; border-radius: 14px; font-size: 13.5px; color: var(--text-dim); text-align: center; }
 
+/* ---------- Sprint 3: Opportunity Hero (Co-Pilot Startscreen) ---------- */
+.ctx-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.ctx-pill { flex: 1; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 999px; padding: 6px 12px; display: flex; gap: 6px; align-items: center; }
+.ctx-pill select { flex: 1; min-width: 0; background: none; border: none; color: var(--text); font-size: 13px; font-weight: 600; -webkit-appearance: none; appearance: none; padding: 6px 0; }
+.ctx-pill select option { background: var(--panel); color: var(--text); }
+.ctx-sep { color: var(--text-dim2); font-size: 12px; }
+.ctx-refresh { width: 38px; height: 38px; border-radius: 50%; background: var(--panel); border: 1px solid var(--panel-border); color: var(--accent-blue); font-size: 16px; flex-shrink: 0; }
+.ctx-refresh:disabled { opacity: .5; }
+
+.hero-card { background: linear-gradient(160deg, #17293a, #10202c); border: 1px solid #2c5a45; border-radius: 20px; padding: 18px; margin-bottom: 14px; }
+.hero-tag { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--accent-green); font-weight: 700; margin-bottom: 8px; }
+.hero-headline { font-size: 19px; font-weight: 700; margin-bottom: 2px; }
+.hero-sub { font-size: 13.5px; color: var(--text-dim); margin-bottom: 14px; }
+.hero-label-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.hero-label { font-size: 26px; font-weight: 800; }
+.confidence-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: rgba(255,255,255,.03); border: 1px solid var(--panel-border); border-radius: 10px; margin-bottom: 14px; font-size: 13px; }
+.confidence-dots { display: flex; gap: 3px; margin-left: auto; }
+.confidence-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--panel-border); }
+.confidence-dots span.on { background: var(--accent-blue); }
+.warum-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim2); margin-bottom: 6px; }
+.warum-list { margin: 0 0 6px; padding-left: 20px; font-size: 13.5px; line-height: 1.55; color: var(--text); }
+.warum-list li { margin-bottom: 3px; }
+.warum-list li.warum-neg { color: var(--text-dim); }
+.index-toggle-btn { font-size: 11.5px; color: var(--text-dim2); background: none; border: none; padding: 4px 0 0; text-decoration: underline dotted; cursor: pointer; }
+.index-reveal { font-size: 12px; color: var(--text-dim2); margin-top: 4px; }
+.index-reveal.hidden { display: none; }
+
+.noch-besser-banner { background: #241a08; border: 1px solid #6b4f14; border-radius: 14px; padding: 12px 14px; margin-bottom: 14px; }
+.noch-besser-tag { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent-yellow); font-weight: 700; margin-bottom: 4px; }
+.noch-besser-body { font-size: 14.5px; font-weight: 700; }
+.noch-besser-sub { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+
+.section-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim2); margin: 4px 0 8px; }
+.day-strip { display: flex; gap: 6px; margin-bottom: 14px; }
+.day-chip { flex: 1; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 12px; padding: 8px 3px; text-align: center; }
+.day-chip.is-today { border-color: var(--accent-blue); }
+.day-chip .dname { font-size: 10.5px; color: var(--text-dim2); margin-bottom: 3px; }
+.day-chip .dname.is-today-label { color: var(--accent-blue); font-weight: 700; }
+.day-chip .ddot { width: 8px; height: 8px; border-radius: 50%; margin: 3px auto; }
+.day-chip .dlabel { font-size: 9px; font-weight: 700; line-height: 1.3; }
+
+.alt-row { display: flex; gap: 10px; margin-bottom: 14px; }
+.alt-card { flex: 1; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; padding: 12px; text-align: center; }
+.alt-card .alt-name { font-size: 13.5px; font-weight: 700; margin-bottom: 4px; }
+.alt-card .alt-label { font-size: 13px; font-weight: 700; }
+.alt-card .alt-conf { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+.details-toggle { display: flex; align-items: center; justify-content: space-between; background: var(--panel); border: 1px dashed #3a5a72; border-radius: 12px; padding: 12px 14px; font-size: 13px; color: var(--text-dim); margin-bottom: 12px; cursor: pointer; }
+.details-body.hidden { display: none; }
+
 .empty-state { text-align: center; color: var(--text-dim2); padding: 30px 10px; font-size: 13.5px; }
 
 a { color: var(--accent-blue); }

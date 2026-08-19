@@ -124,19 +124,25 @@ async function viewCoPilot() {
   const speciesList = await FIDB.getAll("species");
   const waterList = await FIDB.getAll("water");
 
-  const selectors = UI.el("div", { class: "top-selectors" }, [
-    UI.el("div", { class: "selector" }, [
-      "Zielart",
-      UI.el("select", { onchange: (e) => { STATE.species = e.target.value; renderView(); } },
-        speciesList.map((s) => UI.el("option", { value: s.species_id, ...(s.species_id === STATE.species ? { selected: "selected" } : {}) }, `${speciesEmoji(s.species_id)} ${s.name_de}`))),
-    ]),
-    UI.el("div", { class: "selector" }, [
-      "Gewässer",
-      UI.el("select", { onchange: (e) => { STATE.water = e.target.value; renderView(); } },
-        waterList.map((w) => UI.el("option", { value: w.water_id, ...(w.water_id === STATE.water ? { selected: "selected" } : {}) }, w.name_de))),
-    ]),
-  ]);
-  root.appendChild(selectors);
+  // SPRINT 3 (UX Gate): die zwei grossen Dropdown-Panels werden zu einer kompakten Pille mit
+  // Refresh-Icon zusammengefasst — Platz above the fold gehoert jetzt der Hero-Karte, nicht der
+  // Kontextauswahl. Funktional unveraendert (echte <select>-Elemente, gleiche onchange-Logik).
+  const speciesSelect = UI.el("select", { onchange: (e) => { STATE.species = e.target.value; renderView(); } },
+    speciesList.map((s) => UI.el("option", { value: s.species_id, ...(s.species_id === STATE.species ? { selected: "selected" } : {}) }, `${speciesEmoji(s.species_id)} ${s.name_de}`)));
+  const waterSelect = UI.el("select", { onchange: (e) => { STATE.water = e.target.value; renderView(); } },
+    waterList.map((w) => UI.el("option", { value: w.water_id, ...(w.water_id === STATE.water ? { selected: "selected" } : {}) }, w.name_de)));
+  const refreshBtn = UI.el("button", { class: "ctx-refresh", title: "Umweltdaten jetzt aktualisieren", onclick: async (ev) => {
+    ev.target.textContent = "…"; ev.target.disabled = true;
+    try {
+      await FIEnrichment.enrich(STATE.water, isoToday(), currentDayPartNow(), "approximate", null, "session", "copilot_live");
+      UI.toast("Umweltdaten aktualisiert.", "success");
+    } catch (e) { UI.toast("Aktualisierung fehlgeschlagen: " + e.message, "error"); }
+    renderView();
+  } }, "⟳");
+  root.appendChild(UI.el("div", { class: "ctx-row" }, [
+    UI.el("div", { class: "ctx-pill" }, [speciesSelect, UI.el("span", { class: "ctx-sep" }, "·"), waterSelect]),
+    refreshBtn,
+  ]));
 
   const calibrated = STATE.species === "mefo" && STATE.water === "luebecker_bucht";
   if (calibrated) {
@@ -149,71 +155,224 @@ async function viewCoPilot() {
 
 function speciesEmoji(id) { return { mefo: "🐟", zander: "🐠", hecht: "🐊", barsch: "🐟" }[id] || "🐟"; }
 
-async function buildMefoCopilotPanels() {
-  const container = document.createDocumentFragment();
-  const dt = new Date();
-  dt.setMinutes(0, 0, 0);
-  const dayPart = currentDayPartNow();
+const WEEKDAY_SHORT = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
+const WEEKDAY_LONG = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
+function weekdayShort(d) { return WEEKDAY_SHORT[d.getUTCDay()]; }
+function weekdayLong(d) { return WEEKDAY_LONG[d.getUTCDay()]; }
+function fmtTime(d) { return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }); }
 
-  let snap = await latestSnapshotForWater("luebecker_bucht");
-  const refreshBtn = UI.el("button", { class: "btn btn-ghost", style: "margin-bottom:12px;", onclick: async (ev) => {
-    ev.target.textContent = "Lädt…"; ev.target.disabled = true;
+// SPRINT 3 — "bestes Zeitfenster" als konkretes Fenster statt zweier Einzelzeiten: 60 Minuten vor
+// Sonnenuntergang bis 60 Minuten nach Ende der buergerlichen Daemmerung. Keine neue Behauptung —
+// dieselbe Daemmerungs-Praemisse wie das bisherige "Zeitfenster (Daemmerung)"-Panel, nur jetzt als
+// Zeitspanne statt als zwei Rohzeiten dargestellt.
+function duskWindowFromSunEvents(sun) {
+  if (!sun?.sunset?.measured_at || !sun?.civil_twilight_end?.measured_at) return null;
+  const sunset = new Date(sun.sunset.measured_at);
+  const twilightEnd = new Date(sun.civil_twilight_end.measured_at);
+  return { start: new Date(sunset.getTime() - 60 * 60000), end: new Date(twilightEnd.getTime() + 60 * 60000) };
+}
+
+// SPRINT 3 — Auto-Refresh: "Ich hab jetzt Bock" darf nicht an einem manuellen Tap haengen. Beim
+// Oeffnen wird automatisch aktualisiert, wenn der letzte Snapshot fehlt oder aelter als 2h ist. Der
+// manuelle Refresh (Icon-Button oben, Button in den Details) bleibt zusaetzlich verfuegbar. Offline
+// wird der ggf. aeltere vorhandene Snapshot verwendet, kein Fake-Fetch-Versuch (Kernprinzip
+// unveraendert, siehe enrichment.js).
+async function ensureFreshSnapshot(waterId, dayPart, maxAgeMs = 2 * 3600 * 1000) {
+  let snap = await latestSnapshotForWater(waterId);
+  const stale = !snap || (Date.now() - new Date(snap.updated_at).getTime()) > maxAgeMs;
+  if (stale && navigator.onLine) {
     try {
-      snap = await FIEnrichment.enrich("luebecker_bucht", isoToday(), dayPart, "approximate", null, "session", "copilot_live");
-      UI.toast(`Umweltdaten aktualisiert (${snap.status}).`, snap.status === "failed" ? "error" : "success");
-    } catch (e) { UI.toast("Aktualisierung fehlgeschlagen: " + e.message, "error"); }
-    renderView();
-  } }, "🔄 Umweltdaten jetzt aktualisieren");
+      snap = await FIEnrichment.enrich(waterId, isoToday(), dayPart, "approximate", null, "session", "copilot_live");
+    } catch (e) { /* vorhandenen (ggf. aelteren) Snapshot behalten, kein Datenverlust */ }
+  }
+  return snap;
+}
+
+// SPRINT 3 — In-Memory-Cache fuer den 3-5-Tage-Wassertemperatur-Ausblick: reine Anzeige-Hilfswerte
+// fuer den Startscreen (keine Fangmeldung), daher bewusst KEIN neuer IndexedDB-Store dafuer.
+let _forecastCache = null; // { waterId, dateIso, fetchedAt, result }
+async function ensureForecastDaily(waterId, lat, lon, startDt, days, maxAgeMs = 2 * 3600 * 1000) {
+  const dateIso = startDt.toISOString().slice(0, 10);
+  if (_forecastCache && _forecastCache.waterId === waterId && _forecastCache.dateIso === dateIso &&
+    (Date.now() - _forecastCache.fetchedAt) < maxAgeMs) {
+    return _forecastCache.result;
+  }
+  if (!navigator.onLine) return _forecastCache?.result || { ok: false, error: "offline", days: [] };
+  const marine = new FIProviders.OpenMeteoMarineProvider();
+  const result = await marine.getWaterTempForecastDaily(lat, lon, startDt, days);
+  _forecastCache = { waterId, dateIso, fetchedAt: Date.now(), result };
+  return result;
+}
+
+function confLabelDe(tier) { return { hoch: "Hoch", mittel: "Mittel", niedrig: "Niedrig" }[tier] || "Niedrig"; }
+function tierColor(label) {
+  const cls = FIMefoModel.labelChipClass(label);
+  return cls === "chip-green" ? "var(--accent-green)" : cls === "chip-yellow" ? "var(--accent-yellow)" :
+    cls === "chip-red" ? "var(--accent-red)" : "var(--text-dim2)";
+}
+
+// SPRINT 3 — Opportunity Hero. Ersetzt die bisherigen fuenf gleichrangigen Panels (Fangchance /
+// hartcodierter Top-Spot / Zeitfenster / Strategie / Bedingungen) durch: eine "Heute"-Hero-Karte
+// (Spot ECHT berechnet statt hartcodiert, Zeitfenster, Label GROSS + Index nur hinter Tap, Confidence
+// SEPARAT, dynamisches "Warum?"), einen "Noch besser"-Hinweis (nur wenn ein Folgetag die dokumentierte
+// Schwelle ueberschreitet, siehe FIMefoModel.pickNochBesser), einen kompakten 3-5-Tage-Streifen,
+// 1-2 Alternativ-Spots (echte Rangliste, siehe FIMefoModel.rankSpots), und einen eingeklappten
+// "Details & Rohdaten"-Bereich fuer Strategie-Text/Rohwerte/Spot-Rangliste. Siehe
+// docs/SPRINT3_UX_GATE_FINALIZATION.md fuer die vollstaendige Methodik/Begruendung.
+async function buildMefoCopilotPanels() {
+  const waterId = STATE.water;
+  const dayPart = currentDayPartNow();
+  const today = todayUtcMidnight();
+  const [refLat, refLon] = FIRegistry.WATER_REFERENCE_POINTS[waterId];
+
+  const snap = await ensureFreshSnapshot(waterId, dayPart);
+
+  const rankedSpots = FIMefoModel.rankSpots();
+  const topSpot = rankedSpots[0] || null;
+  const altSpots = rankedSpots.slice(1, 3);
+
+  const forecast = await ensureForecastDaily(waterId, refLat, refLon, today, 5);
+  const astro = new FIAstro.NOAAAstroProvider();
+  const dayEntries = [];
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(today.getTime() + i * 86400000);
+    const month = d.getUTCMonth() + 1;
+    let wassertemp, envTier, sunEvents;
+    if (i === 0) {
+      wassertemp = snap?.water_temp_c?.value ?? null;
+      envTier = snap?.data_quality || "niedrig";
+      sunEvents = snap?.sunset && snap?.civil_twilight_end ? { sunset: snap.sunset, civil_twilight_end: snap.civil_twilight_end } : astro.getSunEvents(refLat, refLon, d);
+    } else {
+      const fEntry = forecast?.ok ? forecast.days.find((x) => x.dayOffset === i) : null;
+      wassertemp = (fEntry && fEntry.value !== null) ? fEntry.value : null;
+      envTier = wassertemp === null ? "niedrig" : FIMefoModel.forecastEnvTier(i, "hoch");
+      sunEvents = astro.getSunEvents(refLat, refLon, d);
+    }
+    const fc = FIMefoModel.basisFangchance(month, wassertemp);
+    const confidenceTier = FIMefoModel.combineConfidenceTier(envTier, topSpot ? topSpot.confidenceTier : "niedrig");
+    dayEntries.push({ date: d, dayOffset: i, index: fc.score, label: fc.label, tFactor: fc.tFactor,
+      wassertemp, envTier, confidenceTier, duskWindow: duskWindowFromSunEvents(sunEvents) });
+  }
+
+  const todayEntry = dayEntries[0];
+  const nochBesser = FIMefoModel.pickNochBesser(todayEntry, dayEntries.slice(1));
+  const warumReasons = FIMefoModel.buildWarumReasons(today.getUTCMonth() + 1, todayEntry.wassertemp, todayEntry.tFactor, topSpot);
 
   const wrap = UI.el("div", {});
-  wrap.appendChild(refreshBtn);
 
-  const wassertemp = snap?.water_temp_c?.value ?? null;
-  const fc = FIMefoModel.basisFangchance(dt.getMonth() + 1, wassertemp);
+  // ---- HERO: HEUTE ----
+  const indexReveal = UI.el("div", { class: "index-reveal hidden" },
+    todayEntry.index !== null
+      ? `Index ${todayEntry.index} — informativ, ersetzt nicht die Confidence. Index ≠ Fangwahrscheinlichkeit.`
+      : "Index nicht berechenbar (keine aktuelle Wassertemperatur).");
+  const indexToggle = UI.el("button", { class: "index-toggle-btn", onclick: (ev) => {
+    indexReveal.classList.toggle("hidden");
+    ev.currentTarget.textContent = indexReveal.classList.contains("hidden") ? "Index anzeigen ⓘ" : "Index ausblenden";
+  } }, "Index anzeigen ⓘ");
 
-  wrap.appendChild(UI.el("div", { class: "panel" }, [
-    UI.el("div", { class: "panel-label" }, "Fangchance"),
-    UI.el("div", { class: "row" }, [
-      UI.el("div", { style: "font-size:44px;font-weight:700;color:var(--accent-green);",
-        html: fc.score !== null ? `${fc.score}<span style="font-size:18px;color:var(--text-dim)">/100</span>` : "—" }),
-      UI.el("span", { class: "chip chip-green" }, fc.label),
+  const heroTimeLine = todayEntry.duskWindow
+    ? `${fmtTime(todayEntry.duskWindow.start)} – ${fmtTime(todayEntry.duskWindow.end)} (Abenddämmerung)`
+    : "Zeitfenster nicht berechenbar (Umweltdaten aktualisieren)";
+
+  const confDots = (tier) => {
+    const n = tier === "hoch" ? 3 : tier === "mittel" ? 2 : 1;
+    return UI.el("div", { class: "confidence-dots" }, [1, 2, 3].map((i) => UI.el("span", { class: i <= n ? "on" : "" })));
+  };
+
+  const heroCard = UI.el("div", { class: "hero-card" }, [
+    UI.el("div", { class: "hero-tag" }, "Heute"),
+    UI.el("div", { class: "hero-headline" }, `${speciesEmoji("mefo")} Meerforelle · ${topSpot ? topSpot.name : "kein historisch validierter Spot"}`),
+    UI.el("div", { class: "hero-sub" }, heroTimeLine),
+    UI.el("div", { class: "hero-label-row" }, [
+      UI.el("div", { class: "hero-label", style: `color:${tierColor(todayEntry.label)};` }, todayEntry.label.toUpperCase()),
     ]),
-    UI.el("div", { class: "subtext" }, fc.hinweis + (wassertemp === null ? " (aktuell keine Wassertemperatur verfügbar — auf 🔄 tippen.)" : "")),
-  ]));
+    indexToggle, indexReveal,
+    UI.el("div", { class: "confidence-row" }, [
+      UI.el("span", {}, ["Confidence: ", UI.el("strong", {}, confLabelDe(todayEntry.confidenceTier))]),
+      confDots(todayEntry.confidenceTier),
+    ]),
+    UI.el("div", { class: "warum-label" }, "Warum?"),
+    UI.el("ul", { class: "warum-list" }, warumReasons.map((r) =>
+      UI.el("li", { class: r.ok ? "" : "warum-neg" }, `${r.ok ? "✓" : "•"} ${r.text}`))),
+  ]);
+  wrap.appendChild(heroCard);
 
-  wrap.appendChild(UI.el("div", { class: "panel" }, [
-    UI.el("div", { class: "panel-label" }, "Top Spot (historisch, Lübecker Bucht)"),
-    UI.el("div", { class: "row" }, ["Pelzerhaken", UI.el("span", { class: "chip" }, "Confidence: mittel (n=26)")]),
-    UI.el("div", { class: "subtext" }, FIMefoModel.spotMatch("pelzerhaken").hinweis + " Kein automatisches GPS-Matching — Spot wird beim Fang-Log manuell gewählt."),
-  ]));
+  // ---- NOCH BESSER (nur bei erfuellter, dokumentierter Regel — siehe pickNochBesser) ----
+  if (nochBesser) {
+    wrap.appendChild(UI.el("div", { class: "noch-besser-banner" }, [
+      UI.el("div", { class: "noch-besser-tag" }, "🔥 Noch besser"),
+      UI.el("div", { class: "noch-besser-body" }, `${weekdayLong(nochBesser.date)} · ${topSpot ? topSpot.name : "—"}`),
+      UI.el("div", { class: "noch-besser-sub" }, [
+        nochBesser.duskWindow ? `${fmtTime(nochBesser.duskWindow.start)} – ${fmtTime(nochBesser.duskWindow.end)} · ` : "",
+        UI.el("strong", { style: `color:${tierColor(nochBesser.label)};` }, nochBesser.label.toUpperCase()),
+      ]),
+    ]));
+  }
 
-  const sun = snap?.sunrise?.measured_at ? new Date(snap.sunrise.measured_at) : null;
-  const sunset = snap?.sunset?.measured_at ? new Date(snap.sunset.measured_at) : null;
-  wrap.appendChild(UI.el("div", { class: "panel" }, [
-    UI.el("div", { class: "panel-label" }, "Zeitfenster (Dämmerung, heute)"),
-    UI.el("div", { style: "font-size:22px;font-weight:700;color:var(--accent-yellow);" },
-      sun && sunset ? `${sun.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })} / ${sunset.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}` : "🔄 aktualisieren für Zeiten"),
-    UI.el("div", { class: "subtext" }, "Sonnenauf-/-untergang, deterministisch berechnet (NOAA Sunrise Equation) — läuft immer, unabhängig vom Netz."),
-  ]));
+  // ---- NAECHSTE TAGE ----
+  wrap.appendChild(UI.el("div", { class: "section-label" }, "Nächste Tage"));
+  wrap.appendChild(UI.el("div", { class: "day-strip" }, dayEntries.map((entry, i) => UI.el("div", { class: "day-chip" + (i === 0 ? " is-today" : "") }, [
+    UI.el("div", { class: "dname" + (i === 0 ? " is-today-label" : "") }, i === 0 ? `${weekdayShort(entry.date)}·heute` : weekdayShort(entry.date)),
+    UI.el("div", { class: "ddot", style: `background:${tierColor(entry.label)};` }),
+    UI.el("div", { class: "dlabel" }, entry.label.toUpperCase()),
+  ]))));
 
+  // ---- ALTERNATIVEN HEUTE (echte Rangliste, keine erfundene Alternative) ----
+  if (altSpots.length) {
+    wrap.appendChild(UI.el("div", { class: "section-label" }, "Alternativen heute"));
+    wrap.appendChild(UI.el("div", { class: "alt-row" }, altSpots.map((sp) => {
+      const altConf = FIMefoModel.combineConfidenceTier(todayEntry.envTier, sp.confidenceTier);
+      return UI.el("div", { class: "alt-card" }, [
+        UI.el("div", { class: "alt-name" }, sp.name),
+        UI.el("div", { class: "alt-label", style: `color:${tierColor(todayEntry.label)};` }, todayEntry.label.toUpperCase()),
+        UI.el("div", { class: "alt-conf" }, `Confidence: ${confLabelDe(altConf)}`),
+      ]);
+    })));
+  }
+
+  // ---- DETAILS & ROHDATEN (eingeklappt: bisheriges Strategie-/Bedingungen-Panel + Spot-Rangliste) ----
   const windBft = snap?.wind_speed_bft?.value ?? null;
   const windDir = snap?.wind_dir_deg?.value ?? null;
-  wrap.appendChild(UI.el("div", { class: "panel" }, [
-    UI.el("div", { class: "panel-label" }, "Strategie"),
-    UI.el("div", { class: "subtext", style: "font-size:14px;color:var(--text);" }, FIMefoModel.strategieHinweis(windDir, windBft, 68)),
-  ]));
-
-  wrap.appendChild(UI.el("div", { class: "panel" }, [
-    UI.el("div", { class: "panel-label" }, "Bedingungen"),
-    UI.el("div", { class: "quality-grid", style: "grid-template-columns:1fr 1fr;font-size:13px;" }, [
-      UI.el("div", {}, `Lufttemp.: ${UI.fmtProvValue(snap?.air_temp_c)}`),
-      UI.el("div", {}, `Wind: ${UI.fmtProvValue(snap?.wind_dir_deg, 0)}° / ${UI.fmtProvValue(snap?.wind_speed_bft, 0)} Bft`),
-      UI.el("div", {}, `Pegel: ${UI.fmtProvValue(snap?.water_level_cm, 0)}`),
-      UI.el("div", {}, `Wassertemp.: ${UI.fmtProvValue(snap?.water_temp_c)}`),
+  const detailsBody = UI.el("div", { class: "details-body hidden" }, [
+    UI.el("div", { class: "panel" }, [
+      UI.el("div", { class: "panel-label" }, "Strategie"),
+      UI.el("div", { class: "subtext", style: "font-size:14px;color:var(--text);" }, FIMefoModel.strategieHinweis(windDir, windBft, 68)),
     ]),
-    snap ? UI.el("div", { class: "subtext", html: `Status: ${UI.statusChip(snap.status)} · Datenqualität: ${snap.data_quality}` }) : null,
-  ]));
+    UI.el("div", { class: "panel" }, [
+      UI.el("div", { class: "panel-label" }, "Bedingungen"),
+      UI.el("div", { class: "quality-grid", style: "grid-template-columns:1fr 1fr;font-size:13px;" }, [
+        UI.el("div", {}, `Lufttemp.: ${UI.fmtProvValue(snap?.air_temp_c)}`),
+        UI.el("div", {}, `Wind: ${UI.fmtProvValue(snap?.wind_dir_deg, 0)}° / ${UI.fmtProvValue(snap?.wind_speed_bft, 0)} Bft`),
+        UI.el("div", {}, `Pegel: ${UI.fmtProvValue(snap?.water_level_cm, 0)}`),
+        UI.el("div", {}, `Wassertemp.: ${UI.fmtProvValue(snap?.water_temp_c)}`),
+      ]),
+      snap ? UI.el("div", { class: "subtext", html: `Status: ${UI.statusChip(snap.status)} · Datenqualität: ${snap.data_quality}` }) : null,
+    ]),
+    UI.el("div", { class: "panel" }, [
+      UI.el("div", { class: "panel-label" }, "Spot-Rangliste (historisch, Lübecker Bucht)"),
+      UI.el("div", { class: "subtext" },
+        "Historical Spot Strength: reine, shrinkage-korrigierte Fangbuch-Quote je Spot — KEINE tagesaktuelle Wetter-/Bedingungs-Interaktion unterstellt. Die Rangfolge ändert sich bewusst nicht von Tag zu Tag (siehe Phase 2.5)."),
+      UI.el("ul", { class: "warum-list", style: "padding-left:16px;" }, rankedSpots.slice(0, 6).map((sp) =>
+        UI.el("li", {}, `${sp.name}: ${Math.round(sp.shrunkRate * 100)}% (n=${sp.n}, Confidence: ${confLabelDe(sp.confidenceTier)})`))),
+    ]),
+    UI.el("button", { class: "btn btn-ghost", onclick: async (ev) => {
+      ev.target.textContent = "Lädt…"; ev.target.disabled = true;
+      try {
+        await FIEnrichment.enrich(waterId, isoToday(), dayPart, "approximate", null, "session", "copilot_live");
+        UI.toast("Umweltdaten aktualisiert.", "success");
+      } catch (e) { UI.toast("Aktualisierung fehlgeschlagen: " + e.message, "error"); }
+      renderView();
+    } }, "🔄 Umweltdaten jetzt aktualisieren"),
+  ]);
+  const detailsToggleLabel = UI.el("span", {}, "▾ Details & Rohdaten");
+  const detailsToggle = UI.el("div", { class: "details-toggle", onclick: () => {
+    detailsBody.classList.toggle("hidden");
+    detailsToggleLabel.textContent = detailsBody.classList.contains("hidden") ? "▾ Details & Rohdaten" : "▴ Details & Rohdaten";
+  } }, [detailsToggleLabel, UI.el("span", {}, "Wind · Pegel · Datenqualität · Spot-Rangliste")]);
+  wrap.appendChild(detailsToggle);
+  wrap.appendChild(detailsBody);
 
+  const container = document.createDocumentFragment();
   container.appendChild(wrap);
   return container;
 }

@@ -46,8 +46,8 @@ function basisFangchance(month, wassertemp) {
   if (t === null) return { score: null, label: "Unbekannt", sFactor: s, tFactor: null,
     hinweis: "Keine Wassertemperatur verfuegbar — Fangchance kann nicht berechnet werden." };
   const idx = 100.0 * Math.max(s, 1e-6) ** 0.5 * Math.max(t, 1e-6) ** 0.5;
-  const label = idx >= 65 ? "Gut" : idx >= 40 ? "Mittel" : "Schwach";
-  return { score: Math.round(idx * 10) / 10, label, sFactor: s, tFactor: t,
+  const rounded = Math.round(idx * 10) / 10;
+  return { score: rounded, label: labelForIndex(rounded), sFactor: s, tFactor: t,
     hinweis: "Basis = Saison × Temperatur (validiert, AUC 0,674 OOS). Wind/Exposition fliessen NICHT in diese Zahl ein." };
 }
 
@@ -87,5 +87,142 @@ function strategieHinweis(windDirDeg, windBft, onshoreDeg) {
   return parts.join(" ");
 }
 
+// ---------------------------------------------------------------------------
+// SPRINT 3 — Opportunity Hero (UX Gate, siehe docs/SPRINT3_UX_CONCEPT_COPILOT.md und
+// docs/SPRINT3_UX_GATE_FINALIZATION.md). Drei rein additive Bausteine zur bestehenden,
+// UNVERAENDERTEN Fangchance-Logik oben:
+//   1) ein 4-stufiges Label (Schwach/Mäßig/Gut/Sehr gut) statt bisher 3 Stufen — der numerische
+//      Index wird auf dem Startscreen laut Auftrag entfernt/versteckt, das Label muss daher allein
+//      differenziert genug sein.
+//   2) eine ECHTE, dynamische Spot-Rangliste (rankSpots) statt des bisherigen hartcodierten
+//      "Pelzerhaken" — ausdruecklich NUR auf Basis der HISTORISCHEN Spot-Staerke (shrunk-Rate),
+//      OHNE jede Tages-/Wetterabhaengigkeit: eine Spot×Wetter-Interaktion ist nicht durch Daten
+//      gestuetzt (Phase 2.5: additives Modell, ueber Tagestypen hinweg stabile Rangfolge, Exposure-
+//      Variablen bleiben OOS unter Zufallsniveau) und darf laut Auftrag NICHT suggeriert werden.
+//      Das ist "Historical Spot Strength", NICHT "Current Spot Suitability" — die Rangfolge aendert
+//      sich bewusst NICHT von Tag zu Tag.
+//   3) eine dreistufige Confidence (hoch/mittel/niedrig), die NIE in den Index eingerechnet wird,
+//      sondern separat aus Umweltdatenqualitaet UND Spot-Stichprobengroesse kombiniert wird
+//      (konservatives Minimum — eine Gesamteinschaetzung darf nie sicherer wirken als ihr
+//      unsicherstes Einzelsignal).
+// ---------------------------------------------------------------------------
+
+const LABEL_TIERS = [
+  { min: 75, label: "Sehr gut" },
+  { min: 55, label: "Gut" },
+  { min: 30, label: "Mäßig" },
+  { min: -Infinity, label: "Schwach" },
+];
+const LABEL_RANK = { "Schwach": 0, "Mäßig": 1, "Gut": 2, "Sehr gut": 3 };
+
+// Schwellen sind eine bewusste, im UX-Gate dokumentierte Setzung, KEINE neue statistische
+// Herleitung — bei AUC 0,674 (Out-of-Sample) waere eine feinere Abstufung als vier grobe
+// Kategorien ohnehin false precision.
+function labelForIndex(idx) {
+  if (idx === null || idx === undefined) return "Unbekannt";
+  return LABEL_TIERS.find((t) => idx >= t.min).label;
+}
+function labelRank(label) { return label in LABEL_RANK ? LABEL_RANK[label] : -1; }
+function labelChipClass(label) {
+  if (label === "Sehr gut" || label === "Gut") return "chip-green";
+  if (label === "Mäßig") return "chip-yellow";
+  if (label === "Schwach") return "chip-red";
+  return "chip";
+}
+
+// Dreistufige Confidence (Hoch/Mittel/Niedrig). Kollabiert die bestehende 5-stufige spot-n-Bucket-
+// Funktion (confidenceLabel oben, unveraendert und weiterhin fuer Detailtexte genutzt) auf 3 Stufen
+// und kombiniert konservativ (Minimum) mit der Umweltdatenqualitaet.
+const CONF_RANK = { hoch: 2, mittel: 1, niedrig: 0 };
+function spotConfidenceTier(n) {
+  if (n === null || n === undefined || n < 15) return "niedrig";
+  if (n < 60) return "mittel";
+  return "hoch";
+}
+function combineConfidenceTier(a, b) {
+  if (!a) return b || "niedrig";
+  if (!b) return a;
+  return (CONF_RANK[a] ?? 0) <= (CONF_RANK[b] ?? 0) ? a : b;
+}
+// Vereinfachte, dokumentierte Heuristik fuer die Vorhersage-Unsicherheit ueber den Horizont: Open-
+// Meteo liefert keine eigene Guetenangabe pro Vorhersagewert. Statt das vorzutaeuschen, wird die
+// Umwelt-Confidence mit zunehmendem Horizont konservativ GEDECKELT (nicht neu gemessen): Tag 0
+// behaelt die tatsaechliche Fetch-Qualitaet, Tag 1-2 hoechstens "mittel", Tag 3-4 hoechstens
+// "niedrig" — das ist auch der Grund, warum der "Noch besser"-Hinweis (siehe pickNochBesser)
+// praktisch nur fuer nahe Tage ausloesen kann, nicht fuer Tag 4/5.
+function forecastEnvTier(dayOffset, actualEnvTier) {
+  if (dayOffset <= 0) return actualEnvTier || "niedrig";
+  const cap = dayOffset <= 2 ? "mittel" : "niedrig";
+  return combineConfidenceTier(actualEnvTier || "hoch", cap);
+}
+
+// Dynamische Spot-Rangliste — ersetzt das bisherige hartcodierte "Top Spot: Pelzerhaken" komplett.
+// Sortiert NUR nach der shrinkage-korrigierten historischen Fangquote (shrunk). Spots mit n<10
+// (kein belastbarer Fangbuch-Bezug) werden ausgeschlossen, ebenso "ostsee_allgemein" (kein
+// konkreter, waehlbarer Spot).
+function rankSpots(limit = null) {
+  const ranked = Object.entries(SPOT_STATS)
+    .filter(([key, st]) => key !== "ostsee_allgemein" && st.n >= 10)
+    .map(([key, st]) => ({ spotKey: key, name: st.name, shrunkRate: st.shrunk, n: st.n,
+      confidenceTier: spotConfidenceTier(st.n) }))
+    .sort((a, b) => b.shrunkRate - a.shrunkRate);
+  return limit ? ranked.slice(0, limit) : ranked;
+}
+
+// "Warum?" — ausschliesslich aus real vorhandenen Signalen (Saison, Wassertemperatur, historische
+// Spot-Staerke). Reagiert auf den TATSAECHLICHEN Zustand (auch negativ formuliert, z.B. schwache
+// Saison), suggeriert aber NIE eine tagesspezifische Spot-Bedingungs-Interaktion (siehe rankSpots).
+// Hinweis: gazetteers.js exportiert bereits ein GAZ.MONTH_NAMES (Objekt fuer Voice-Parsing) im
+// selben globalen Script-Scope. Hier bewusst ein eigener, umbenannter Bezeichner (Array, 1-indiziert
+// fuer direkten Monats-Lookup), um die Doppel-Deklaration/den SyntaxError zu vermeiden.
+const MEFO_MONTH_NAMES = ["", "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
+  "September", "Oktober", "November", "Dezember"];
+function buildWarumReasons(month, wassertemp, tFactorVal, topSpot) {
+  const reasons = [];
+  const sVal = sFactor(month);
+  if (sVal >= 1.0) reasons.push({ ok: true, text: `Saison aktuell stark (${MEFO_MONTH_NAMES[month]})` });
+  else if (sVal >= 0.7) reasons.push({ ok: true, text: `Saison aktuell solide (${MEFO_MONTH_NAMES[month]})` });
+  else reasons.push({ ok: false, text: `Saison aktuell eher schwach (${MEFO_MONTH_NAMES[month]})` });
+
+  if (wassertemp === null || wassertemp === undefined || tFactorVal === null) {
+    reasons.push({ ok: false, text: "Keine aktuelle Wassertemperatur verfügbar" });
+  } else if (tFactorVal >= 0.85) {
+    reasons.push({ ok: true, text: `Wassertemperatur im optimalen Bereich (${wassertemp.toFixed(1)} °C)` });
+  } else if (tFactorVal >= 0.5) {
+    reasons.push({ ok: true, text: `Wassertemperatur im brauchbaren Bereich (${wassertemp.toFixed(1)} °C)` });
+  } else {
+    reasons.push({ ok: false, text: `Wassertemperatur außerhalb des optimalen Bereichs (${wassertemp.toFixed(1)} °C)` });
+  }
+
+  if (topSpot) {
+    reasons.push({ ok: true, text: `${topSpot.name} historisch überdurchschnittlich ` +
+      `(${Math.round(topSpot.shrunkRate * 100)} %, n=${topSpot.n})` });
+  }
+  return reasons;
+}
+
+// "Noch besser"-Regel (Sprint-3-UX-Gate, Punkt 1) — dokumentiert, nachvollziehbar, konservativ:
+//   1) Betrachtet werden nur Tage NACH heute im uebergebenen Fenster (3-5 Tage).
+//   2) Ein Tag ist Kandidat, wenn sein Label eine echte Stufe besser ist als das heutige
+//      (labelRank(tag) - labelRank(heute) >= 1) UND sein Index mindestens 15 Punkte ueber dem
+//      heutigen liegt (verhindert, dass ein Tag nur knapp ueber einer Label-Grenze "besser" wirkt).
+//   3) Ein Kandidat wird NUR gezeigt, wenn seine eigene Confidence mindestens "mittel" ist (keine
+//      Umplanung auf Basis einer unsicheren Fernprognose — s. forecastEnvTier).
+//   4) Unter den verbleibenden Kandidaten gewinnt der mit dem hoechsten Index.
+//   5) Erfuellt kein Tag alle Kriterien, wird KEIN Hinweis gezeigt.
+function pickNochBesser(todayEntry, futureDays) {
+  const MIN_LABEL_STEPS = 1, MIN_IDX_DELTA = 15;
+  if (!todayEntry || todayEntry.index === null) return null;
+  const candidates = futureDays.filter((d) =>
+    d.index !== null &&
+    (labelRank(d.label) - labelRank(todayEntry.label)) >= MIN_LABEL_STEPS &&
+    (d.index - todayEntry.index) >= MIN_IDX_DELTA &&
+    d.confidenceTier !== "niedrig");
+  if (!candidates.length) return null;
+  return candidates.reduce((best, d) => (d.index > best.index ? d : best), candidates[0]);
+}
+
 window.FIMefoModel = { POPULATION_MEAN, SHRINKAGE_K, SPOT_STATS, sFactor, tFactor,
-  basisFangchance, confidenceLabel, spotMatch, strategieHinweis };
+  basisFangchance, confidenceLabel, spotMatch, strategieHinweis,
+  labelForIndex, labelRank, labelChipClass, spotConfidenceTier, combineConfidenceTier,
+  forecastEnvTier, rankSpots, buildWarumReasons, pickNochBesser };

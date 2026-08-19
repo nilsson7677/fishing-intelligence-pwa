@@ -196,6 +196,38 @@ class OpenMeteoMarineProvider {
     }
   }
 
+  // NEU Sprint 3 (Opportunity Hero — 3-5-Tage-Ausblick): taeglicher Vorhersagewert der
+  // Wasseroberflaechentemperatur fuer die naechsten `days` Tage (inkl. heute, dayOffset 0..days-1).
+  // Bewusst EIN fester Referenzzeitpunkt pro Tag (18:00 UTC, frueher Abend) statt einer
+  // stundengenauen Kurve — die Fangchance-Formel (sFactor x tFactor) braucht nur einen
+  // Tageswert, und Wasseroberflaechentemperatur schwankt untertägig ohnehin wenig. Das ist eine
+  // bewusste, dokumentierte Vereinfachung, keine verschleierte Praezision (siehe
+  // docs/SPRINT3_UX_GATE_FINALIZATION.md, Punkt 3: keine Scheingenauigkeit).
+  async getWaterTempForecastDaily(lat, lon, startDt, days = 5) {
+    const endDt = new Date(startDt.getTime() + (days - 1) * 86400000);
+    const qs = `latitude=${lat}&longitude=${lon}&hourly=sea_surface_temperature` +
+      `&start_date=${startDt.toISOString().slice(0, 10)}&end_date=${endDt.toISOString().slice(0, 10)}&timezone=UTC`;
+    const res = await fetchJson(`${OM_MARINE_URL}?${qs}`);
+    if (!res.ok) return { ok: false, error: res.error, days: [] };
+    try {
+      const times = res.data.hourly.time.map((t) => Date.parse(t + "Z"));
+      const vals = res.data.hourly.sea_surface_temperature;
+      const out = [];
+      for (let i = 0; i < days; i++) {
+        const dayDt = new Date(startDt.getTime() + i * 86400000);
+        dayDt.setUTCHours(18, 0, 0, 0);
+        const idx = nearestIndex(times, dayDt.getTime());
+        const v = vals[idx];
+        out.push({ dayOffset: i, date: dayDt.toISOString().slice(0, 10),
+          value: (v === null || v === undefined) ? null : v, measured_at: res.data.hourly.time[idx] });
+      }
+      return { ok: true, days: out,
+        station_or_gridpoint: `open-meteo-marine Gitterpunkt lat=${lat},lon=${lon}, taeglicher Referenzwert 18:00 UTC` };
+    } catch (e) {
+      return { ok: false, error: `Parse-Fehler: ${e.message}`, days: [] };
+    }
+  }
+
   // Trend (Abschnitt 16): Delta zu 24/48/72h zuvor.
   async getWaterTempTrend(lat, lon, endDt, hoursBackList = [24, 48, 72]) {
     const maxH = Math.max(...hoursBackList);
