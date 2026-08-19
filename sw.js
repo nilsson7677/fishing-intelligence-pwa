@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v7"; // v7: Voice Loop Runde 6 (Fishing Domain Vocabulary & Entity Resolution)
+const CACHE_NAME = "fishintel-shell-v8"; // v8: Voice Loop Runde 7 (Real-Device-Regression: Merge-Fix "im"->"in", SW-Update-Cache-Fix)
 const SHELL_FILES = [
   "./",
   "./index.html",

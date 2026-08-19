@@ -39,16 +39,36 @@
 //   (2) neuer Kandidat erweitert den bisherigen woertlich am Anfang      -> bisherigen ERSETZEN
 //   (3) bisheriger Kandidat erweitert (ist laenger als) den neuen        -> neuen ignorieren
 //       (Schutz gegen einen von der Recognition-Engine "zurueckgenommenen", kuerzeren Zwischenstand)
-//   (4) sehr grosser gemeinsamer WORT-Praefix (nicht mehr nur Zeichen-Praefix) UND neuer Kandidat
-//       klar laenger (mehr Woerter)                                     -> bisherigen ERSETZEN
+//   (4) sehr wenige abweichende Wortpositionen innerhalb der bisherigen Segmentlaenge UND neuer
+//       Kandidat klar laenger (mehr Woerter)                            -> bisherigen ERSETZEN
 //       (toleriert kleine Nachkorrekturen der Recognition-Engine an bereits gesprochenen Woertern,
 //       die einen reinen Zeichen-Praefix-Vergleich brechen wuerden)
 //   (5) sonst: kein Revisionsverhaeltnis erkennbar                       -> echtes neues Segment
 // Bewusst KEINE zeitbasierte Pause-Erkennung als PRIMAERES Kriterium: ein Recognition-Restart ist
 // bereits eine harte Instanzgrenze (neue Instanz = neue, leere Segmentliste), und zwei echte,
-// unabhaengige Saetze erfuellen praktisch nie die strenge Wort-Praefix-Abdeckung aus Regel 4 - eine
+// unabhaengige Saetze erfuellen praktisch nie die strenge Wort-Uebereinstimmung aus Regel 4 - eine
 // zusaetzliche starre Zeitschwelle wuerde das Risiko bergen, eine einzelne, natuerlich pausierte
 // Aussage faelschlich in zwei Segmente zu zerreissen.
+//
+// RUNDE 7 — Real-Device-Regression nach Runde 6: ein NEUES Geraete-Muster zeigte eine Luecke in
+// Regel 4. Bisher wurde Regel 4 ueber einen gemeinsamen WORT-PRAEFIX bestimmt, der beim ERSTEN
+// abweichenden Wort abbricht (_commonWordPrefixLen) - das erkennt zuverlaessig Nachkorrekturen am
+// ENDE des bisherigen Segments (z.B. "...ein" -> "...eine Mefo..."), nicht aber eine Korrektur
+// MITTEN im Satz, waehrend alle nachfolgenden Woerter unveraendert bleiben. Genau das beobachtete
+// der Nutzer real: "Kai-Uwe hat gestern im Bliesdorf ..." wurde von Android zu "Kai-Uwe hat gestern
+// in Bliesdorf ..." korrigiert (nur "im" -> "in", alle folgenden Woerter identisch). Ein Praefix-
+// Vergleich, der bei "im"/"in" abbricht, sieht dann nur noch 3 von 6 gemeinsamen Woertern - viel zu
+// wenig fuer die alte Abdeckungsschwelle - und haengt den Kandidaten faelschlich als NEUES Segment
+// an, statt ihn als Revision zu erkennen (Ergebnis: doppelter, unleserlicher Rohtext). Fix: statt
+// eines Praefixes, der beim ersten Mismatch stoppt, wird jetzt die GESAMTE Ueberlappung (Laenge des
+// bisherigen, kuerzeren Segments) Wort-fuer-Wort verglichen und die Anzahl ABWEICHENDER Positionen
+// gezaehlt (`_wordOverlapMismatches`) - ohne beim ersten Mismatch abzubrechen. Nur bei SEHR WENIGEN
+// Abweichungen (kleine Nachkorrektur, kein neuer Satz) gilt weiterhin Regel 4. Das bleibt bewusst
+// ein reiner Wort-fuer-Wort-POSITIONSVERGLEICH innerhalb des bereits gesprochenen Fensters - KEINE
+// globale String-Deduplizierung, keine Wortverschiebung/Neuausrichtung, kein Vergleich ausserhalb
+// dieses Fensters. Siehe test/voice_round7_test.js fuer das exakte Real-Device-Regressionsfixture
+// (inkl. Sicherheitsnetz-Test, dass zwei echte unabhaengige Saetze weiterhin NICHT verschmolzen
+// werden) und docs/STT_RESEARCH.md Nachtrag 13 fuer die vollstaendige Herleitung.
 
 class SpeechToTextProvider {
   isAvailable() { throw new Error("not implemented"); }
@@ -168,6 +188,22 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     return n;
   }
 
+  // RUNDE 7 — ersetzt die reine "stoppt beim ersten Mismatch"-Praefixzaehlung fuer Regel 4 (siehe
+  // Kommentarblock oben). Vergleicht die ERSTEN min(aWords.length, bWords.length) Woerter beider
+  // Listen PAARWEISE UEBER DAS GESAMTE FENSTER (bricht NICHT beim ersten Mismatch ab) und liefert
+  // { mismatches, overlapLen } zurueck. Woerter, die NUR im laengeren neuen Kandidaten zusaetzlich
+  // vorkommen (weil der Satz einfach weitergesprochen wurde), liegen ausserhalb des Fensters und
+  // zaehlen bewusst NICHT als Abweichung - hier geht es ausschliesslich um Nachkorrekturen INNERHALB
+  // des bereits gesprochenen Teils.
+  _wordOverlapMismatches(aWords, bWords) {
+    const overlapLen = Math.min(aWords.length, bWords.length);
+    let mismatches = 0;
+    for (let i = 0; i < overlapLen; i++) {
+      if (aWords[i] !== bWords[i]) mismatches++;
+    }
+    return { mismatches, overlapLen };
+  }
+
   // RUNDE 5 — die 5-Fall-Merge-Regel aus dem Auftrag. Gibt zurueck:
   //   "replace"          — neuer Kandidat ersetzt das bisherige Segment (Faelle 2 & 4)
   //   "ignore-duplicate"  — identisch, nichts aendert sich (Fall 1)
@@ -181,16 +217,24 @@ class BrowserSpeechToTextProvider extends SpeechToTextProvider {
     if (b.startsWith(a)) return "replace";  // Fall 2: neuer Kandidat erweitert den bisherigen woertlich
     if (a.startsWith(b)) return "ignore-shorter"; // Fall 3: bisheriger ist bereits die laengere Fassung
 
-    // Fall 4: kein exakter Zeichen-Praefix, aber ein sehr grosser gemeinsamer WORT-Praefix UND der
-    // neue Kandidat ist klar laenger -> toleriert kleine Nachkorrekturen einzelner (meist letzter)
-    // Woerter, die einen reinen Zeichen-Praefix-Vergleich brechen wuerden, ohne bei zwei echten,
-    // unabhaengigen Saetzen faelschlich anzuschlagen (die teilen so gut wie nie fast alle Woerter).
+    // Fall 4 (Runde 7 verallgemeinert, siehe Kommentarblock oben): kein exakter Zeichen-Praefix,
+    // aber innerhalb der bisherigen Segmentlaenge weichen nur SEHR WENIGE Wortpositionen ab UND der
+    // neue Kandidat ist klar laenger -> toleriert kleine Nachkorrekturen einzelner Woerter (egal ob
+    // am Ende ODER MITTEN im Satz), die einen reinen Zeichen-Praefix-Vergleich brechen wuerden, ohne
+    // bei zwei echten, unabhaengigen Saetzen faelschlich anzuschlagen (die weichen fast ueberall ab).
     const aWords = this._wordsOf(prevText);
     const bWords = this._wordsOf(newText);
-    const common = this._commonWordPrefixLen(aWords, bWords);
-    const coversMostOfOld = aWords.length > 0 && common >= aWords.length - 1 && common / aWords.length >= 0.7;
     const clearlyLonger = bWords.length > aWords.length;
-    if (common >= 2 && coversMostOfOld && clearlyLonger) return "replace";
+    if (clearlyLonger && aWords.length >= 2) {
+      const { mismatches, overlapLen } = this._wordOverlapMismatches(aWords, bWords);
+      const allowedMismatches = Math.max(1, Math.floor(aWords.length * 0.15));
+      const matches = overlapLen - mismatches;
+      const smallRevision = mismatches >= 1 && mismatches <= allowedMismatches;
+      const exactPrefixOfOverlap = mismatches === 0; // z.B. Interpunktions-/Gross-Abweichung o.ae.
+      if ((smallRevision || exactPrefixOfOverlap) && matches >= 2 && matches / overlapLen >= 0.7) {
+        return "replace";
+      }
+    }
 
     return "new-segment"; // Fall 5
   }

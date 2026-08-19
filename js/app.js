@@ -42,7 +42,20 @@ async function init() {
   } catch (e) { console.warn("User-Vokabular konnte nicht geladen werden:", e); }
 
   if ("serviceWorker" in navigator) {
-    try { await navigator.serviceWorker.register("sw.js"); } catch (e) { console.warn("SW-Registrierung fehlgeschlagen:", e); }
+    // RUNDE 7 — Real-Device-Regression: { updateViaCache: "none" } sorgt dafuer, dass sw.js SELBST
+    // (das Registrierungs-Skript) NICHT dem normalen HTTP-Cache unterliegt, wenn der Browser
+    // periodisch auf ein neues Service-Worker-Skript prueft (Spezifikations-Default waere sonst
+    // "imports" - NUR importierte Skripte waeren vom Cache ausgenommen, sw.js selbst nicht). Ohne
+    // dieses Flag kann ein Hosting-/CDN-Cache (z.B. GitHub Pages) dazu fuehren, dass der Browser auf
+    // absehbare Zeit eine VERALTETE sw.js-Fassung fuer den Update-Check erhaelt und damit nie merkt,
+    // dass CACHE_NAME sich geaendert hat - das Geraet bleibt dann auf einem alten App-Shell-Stand
+    // haengen, obwohl ein neuer Build deployt wurde. Zusaetzlich wird direkt nach der Registrierung
+    // einmal explizit update() aufgerufen, um den Update-Check sofort anzustossen statt auf den
+    // naechsten (vom Browser terminierten) automatischen Check zu warten.
+    try {
+      const reg = await navigator.serviceWorker.register("sw.js", { updateViaCache: "none" });
+      reg.update().catch(() => {});
+    } catch (e) { console.warn("SW-Registrierung fehlgeschlagen:", e); }
   }
 
   document.querySelectorAll(".nav-btn").forEach((btn) => {
