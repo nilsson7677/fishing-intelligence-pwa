@@ -10,6 +10,16 @@
 // dieses Flags aendert sich am normalen Nutzererlebnis nichts.
 const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug");
 
+// PHASE 5 FOLGEFIX (Android-Realtest 22.08.2026, zweite Runde — "Testfall 5 FAILED auf echtem
+// Geraet"): Build-Kennung, die im Trip-Screen sichtbar gemacht werden kann (nur ueber ?tripdebug=1,
+// analog zum VOICE_DEBUG-Muster), damit ein Geraetetest zweifelsfrei per Screenshot belegen kann,
+// WELCHER Code-Stand tatsaechlich laeuft (haeufigste Ursache fuer "Fix wirkt lokal, aber nicht auf
+// dem Handy" ist ein veralteter Service-Worker-Cache, nicht ein Logikfehler) — UNVERAENDERT am
+// normalen Nutzererlebnis, wenn das Flag fehlt. Bei jeder inhaltlichen Aenderung an
+// renderTripScreen() (js/app.js) MUSS dieser String zusammen mit sw.js CACHE_NAME angehoben werden.
+const APP_BUILD = "phase5-folgefix-v13-2026-08-22";
+const TRIP_DEBUG = new URLSearchParams(window.location.search).has("tripdebug");
+
 const STATE = {
   view: "copilot",
   species: "mefo",
@@ -693,23 +703,43 @@ function renderTripScreen(root) {
     // Co-Pilot-Kontext (STATE.species/STATE.water) aber frei aenderbar — ein Trip kann eine andere
     // Art/ein anderes Gewaesser als der Co-Pilot-Tab gerade zeigt. Nutzt ausschliesslich bereits
     // vorhandene species/water-Referenzdaten (seed-data.js), keine neuen Arten/Gewaesser/Spots.
-    const tripSpeciesSel = UI.el("select", { id: "trip-start-species" }, []);
-    const tripWaterSel = UI.el("select", { id: "trip-start-water" }, []);
+    // FOLGEFIX Runde 2 (Android-Realtest 22.08.2026, Testfall 5 auf echtem Geraet FAILED): zusaetzlich
+    // zu Vorbefuellung + Lesen von .value beim Klick jetzt auch EXPLIZITE change-Listener, die die
+    // getroffene Wahl in eigenen Variablen festhalten — kein Verlass mehr ausschliesslich auf
+    // ".value zum Klickzeitpunkt", falls ein bestimmter WebView/Android-Rendering-Pfad die Werte
+    // anders liefert als im (mit echtem Chromium getesteten) Playwright-Testlauf. TRIP_DEBUG macht
+    // beide Werte live sichtbar, damit ein Geraetetest zweifelsfrei zeigen kann, ob (a) der Change
+    // ueberhaupt ankommt und (b) welcher Build tatsaechlich laeuft.
+    let chosenSpecies = null;
+    let chosenWater = null;
+    const tripSpeciesSel = UI.el("select", { id: "trip-start-species", onchange: (e) => { chosenSpecies = e.target.value; updateTripDebug(); } }, []);
+    const tripWaterSel = UI.el("select", { id: "trip-start-water", onchange: (e) => { chosenWater = e.target.value; updateTripDebug(); } }, []);
+    const debugLine = TRIP_DEBUG ? UI.el("div", { id: "trip-debug-info", class: "subtext", style: "margin-top:8px;font-family:monospace;" }, "") : null;
+    function updateTripDebug() {
+      if (!debugLine) return;
+      debugLine.textContent = `Build ${APP_BUILD} · Co-Pilot-Kontext STATE.species=${STATE.species}/STATE.water=${STATE.water} · Auswahl im Panel: chosenSpecies=${chosenSpecies ?? "(noch nicht geaendert)"}/chosenWater=${chosenWater ?? "(noch nicht geaendert)"} · aktueller select.value: species=${tripSpeciesSel.value || "(leer)"}/water=${tripWaterSel.value || "(leer)"}`;
+    }
     Promise.all([FIDB.getAll("species"), FIDB.getAll("water")]).then(([sp, wa]) => {
       sp.forEach((s) => tripSpeciesSel.appendChild(UI.el("option", { value: s.species_id, ...(s.species_id === STATE.species ? { selected: "selected" } : {}) }, `${speciesEmoji(s.species_id)} ${s.name_de}`)));
       wa.forEach((w) => tripWaterSel.appendChild(UI.el("option", { value: w.water_id, ...(w.water_id === STATE.water ? { selected: "selected" } : {}) }, w.name_de)));
+      updateTripDebug();
     });
     root.appendChild(UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
       UI.el("p", {}, "Standard: KEIN GPS. Ein Trip kann vollständig ohne Standort geführt werden (Start-/Endzeit, Gewässer, Spot manuell, Köder, Fänge, Nullrunde)."),
       UI.el("label", {}, "Zielart"), tripSpeciesSel,
       UI.el("label", {}, "Gewässer"), tripWaterSel,
       UI.el("button", { class: "btn btn-primary", style: "margin-top:12px;", onclick: () => {
+        // Reihenfolge bewusst: zuerst der zuletzt via change-Event festgehaltene Wert, DANN erst
+        // .value als Fallback (deckt den Fall ab, dass der Nutzer den Default nie angefasst hat und
+        // daher nie ein change-Event feuerte), zuletzt STATE als letzter Fallback.
         STATE.trip.active = true;
         STATE.trip.session = { session_id: FIDB.newId("sess"), angler: "Nils", start_time: new Date().toISOString(),
-          species_target: tripSpeciesSel.value || STATE.species, water_id: tripWaterSel.value || STATE.water,
+          species_target: chosenSpecies || tripSpeciesSel.value || STATE.species,
+          water_id: chosenWater || tripWaterSel.value || STATE.water,
           spot_id: null, shore_or_boat: null, result_fish_count: 0, result_contact_count: 0 };
         renderTripScreen(root);
       } }, "▶ Trip starten (ohne GPS)"),
+      ...(debugLine ? [debugLine] : []),
     ]));
   } else {
     const s = STATE.trip.session;
@@ -727,11 +757,16 @@ function renderTripScreen(root) {
     ]);
     const spotSel = UI.el("select", { id: "trip-active-spot", onchange: (e) => { s.spot_id = e.target.value || null; } });
     spotSel.appendChild(UI.el("option", { value: "" }, "(kein bestimmter Spot)"));
+    const activeDebugLine = TRIP_DEBUG ? UI.el("div", { id: "trip-debug-info", class: "subtext", style: "margin-top:8px;font-family:monospace;" }, `Build ${APP_BUILD} · lade Spots…`) : null;
     FIDB.getAll("spot").then((spots) => {
-      spots.filter((sp) => sp.water_id === s.water_id).forEach((sp) =>
+      const matching = spots.filter((sp) => sp.water_id === s.water_id);
+      matching.forEach((sp) =>
         spotSel.appendChild(UI.el("option", { value: sp.spot_id, ...(s.spot_id === sp.spot_id ? { selected: "selected" } : {}) }, sp.name)));
+      if (activeDebugLine) {
+        activeDebugLine.textContent = `Build ${APP_BUILD} · Session species_target=${s.species_target}/water_id=${s.water_id} · Spots gesamt in DB=${spots.length}, davon passend zu water_id=${matching.length} (${matching.map((sp) => sp.spot_id).join(",") || "keine"})`;
+      }
     });
-    const spotRow = UI.el("div", { class: "panel" }, [UI.el("div", { class: "panel-label" }, "Spot (optional)"), spotSel]);
+    const spotRow = UI.el("div", { class: "panel" }, [UI.el("div", { class: "panel-label" }, "Spot (optional)"), spotSel, ...(activeDebugLine ? [activeDebugLine] : [])]);
 
     root.appendChild(UI.el("div", { class: "panel" }, [
       UI.el("p", {}, `Trip läuft seit ${new Date(s.start_time).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}.`),

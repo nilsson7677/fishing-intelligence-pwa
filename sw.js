@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v12"; // v12: Phase 5 Folgefix (Android-Realtest 22.08.2026): Trip-Start liest jetzt STATE.species/STATE.water statt water_id hartkodiert auf luebecker_bucht — nur app.js geaendert, gleiche Dateiliste
+const CACHE_NAME = "fishintel-shell-v13"; // v13: Phase 5 Folgefix Runde 2 (Android-Realtest 22.08.2026, Testfall 5 auf echtem Geraet FAILED): explizite change-Listener + sichtbare Build-Version im Trip-Screen (nur ?tripdebug=1) zur Geraete-Diagnose — nur app.js geaendert, gleiche Dateiliste
 const SHELL_FILES = [
   "./",
   "./index.html",
