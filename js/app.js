@@ -17,7 +17,7 @@ const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug"
 // dem Handy" ist ein veralteter Service-Worker-Cache, nicht ein Logikfehler) — UNVERAENDERT am
 // normalen Nutzererlebnis, wenn das Flag fehlt. Bei jeder inhaltlichen Aenderung an
 // renderTripScreen() (js/app.js) MUSS dieser String zusammen mit sw.js CACHE_NAME angehoben werden.
-const APP_BUILD = "phase5-folgefix-v13-2026-08-22";
+const APP_BUILD = "phase5-multiwater-ux-v14-2026-08-22";
 const TRIP_DEBUG = new URLSearchParams(window.location.search).has("tripdebug");
 
 const STATE = {
@@ -710,33 +710,63 @@ function renderTripScreen(root) {
     // anders liefert als im (mit echtem Chromium getesteten) Playwright-Testlauf. TRIP_DEBUG macht
     // beide Werte live sichtbar, damit ein Geraetetest zweifelsfrei zeigen kann, ob (a) der Change
     // ueberhaupt ankommt und (b) welcher Build tatsaechlich laeuft.
+    // MULTI-WATER UX FOLLOW-UP (Android-Retest 22.08.2026): "Species -> Water -> Spot" ist jetzt
+    // funktional korrekt, aber fuer Meerforelle/Luebecker Bucht aus Nutzersicht ein Rueckschritt:
+    // vorher (vor Runde 1) war water_id sowieso immer luebecker_bucht, aber die Kuestenspots
+    // (Pelzerhaken, Sierksdorf, Weissenhaus, ...) waren im Trip-Start-Bereich zumindest im
+    // nachfolgenden aktiven Trip direkt sichtbar. Jetzt zeigt der Trip-Start nur noch "Gewaesser:
+    // Luebecker Bucht" OHNE die einzelnen Spots. Fix: DRITTE Ebene "Spot" bereits im Trip-Start-
+    // Panel selbst ergaenzen (water_id bleibt der Gewaesser-Kontext, spot_id bleibt die konkrete
+    // Angelstelle) — baut sich aus den vorhandenen seed-data.js-Spots zum jeweils gewaehlten
+    // Gewaesser auf und aktualisiert sich SOFORT bei jedem Water-Wechsel (kein Reload noetig). Der
+    // bestehende Spot-Selector im laufenden Trip (unten, "sonst"-Zweig) bleibt zusaetzlich
+    // bestehen, um den Spot auch waehrend des Trips noch aendern zu koennen.
     let chosenSpecies = null;
     let chosenWater = null;
+    let chosenSpot = null;
     const tripSpeciesSel = UI.el("select", { id: "trip-start-species", onchange: (e) => { chosenSpecies = e.target.value; updateTripDebug(); } }, []);
-    const tripWaterSel = UI.el("select", { id: "trip-start-water", onchange: (e) => { chosenWater = e.target.value; updateTripDebug(); } }, []);
+    const tripWaterSel = UI.el("select", { id: "trip-start-water", onchange: (e) => { chosenWater = e.target.value; chosenSpot = null; rebuildTripStartSpots(); updateTripDebug(); } }, []);
+    const tripSpotSel = UI.el("select", { id: "trip-start-spot", onchange: (e) => { chosenSpot = e.target.value || null; updateTripDebug(); } }, []);
     const debugLine = TRIP_DEBUG ? UI.el("div", { id: "trip-debug-info", class: "subtext", style: "margin-top:8px;font-family:monospace;" }, "") : null;
+    let allSpotsCache = null;
+    function currentWaterId() { return chosenWater || tripWaterSel.value || STATE.water; }
+    function rebuildTripStartSpots() {
+      if (!allSpotsCache) return; // Spots noch nicht geladen — wird nach dem Laden einmal aufgerufen
+      const waterId = currentWaterId();
+      tripSpotSel.innerHTML = "";
+      tripSpotSel.appendChild(UI.el("option", { value: "" }, "(kein bestimmter Spot)"));
+      allSpotsCache.filter((sp) => sp.water_id === waterId).forEach((sp) =>
+        tripSpotSel.appendChild(UI.el("option", { value: sp.spot_id }, sp.name)));
+      updateTripDebug();
+    }
     function updateTripDebug() {
       if (!debugLine) return;
-      debugLine.textContent = `Build ${APP_BUILD} · Co-Pilot-Kontext STATE.species=${STATE.species}/STATE.water=${STATE.water} · Auswahl im Panel: chosenSpecies=${chosenSpecies ?? "(noch nicht geaendert)"}/chosenWater=${chosenWater ?? "(noch nicht geaendert)"} · aktueller select.value: species=${tripSpeciesSel.value || "(leer)"}/water=${tripWaterSel.value || "(leer)"}`;
+      const waterId = currentWaterId();
+      const spotCount = allSpotsCache ? allSpotsCache.filter((sp) => sp.water_id === waterId).length : "?";
+      debugLine.textContent = `Build ${APP_BUILD} · Co-Pilot-Kontext STATE.species=${STATE.species}/STATE.water=${STATE.water} · Auswahl im Panel: chosenSpecies=${chosenSpecies ?? "(noch nicht geaendert)"}/chosenWater=${chosenWater ?? "(noch nicht geaendert)"}/chosenSpot=${chosenSpot ?? "(keiner)"} · aktueller select.value: species=${tripSpeciesSel.value || "(leer)"}/water=${tripWaterSel.value || "(leer)"} · Spots zu diesem Gewaesser=${spotCount}`;
     }
-    Promise.all([FIDB.getAll("species"), FIDB.getAll("water")]).then(([sp, wa]) => {
+    Promise.all([FIDB.getAll("species"), FIDB.getAll("water"), FIDB.getAll("spot")]).then(([sp, wa, spots]) => {
       sp.forEach((s) => tripSpeciesSel.appendChild(UI.el("option", { value: s.species_id, ...(s.species_id === STATE.species ? { selected: "selected" } : {}) }, `${speciesEmoji(s.species_id)} ${s.name_de}`)));
       wa.forEach((w) => tripWaterSel.appendChild(UI.el("option", { value: w.water_id, ...(w.water_id === STATE.water ? { selected: "selected" } : {}) }, w.name_de)));
+      allSpotsCache = spots;
+      rebuildTripStartSpots();
       updateTripDebug();
     });
     root.appendChild(UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
       UI.el("p", {}, "Standard: KEIN GPS. Ein Trip kann vollständig ohne Standort geführt werden (Start-/Endzeit, Gewässer, Spot manuell, Köder, Fänge, Nullrunde)."),
       UI.el("label", {}, "Zielart"), tripSpeciesSel,
       UI.el("label", {}, "Gewässer"), tripWaterSel,
+      UI.el("label", {}, "Spot (optional)"), tripSpotSel,
       UI.el("button", { class: "btn btn-primary", style: "margin-top:12px;", onclick: () => {
         // Reihenfolge bewusst: zuerst der zuletzt via change-Event festgehaltene Wert, DANN erst
         // .value als Fallback (deckt den Fall ab, dass der Nutzer den Default nie angefasst hat und
-        // daher nie ein change-Event feuerte), zuletzt STATE als letzter Fallback.
+        // daher nie ein change-Event feuerte), zuletzt STATE/null als letzter Fallback.
         STATE.trip.active = true;
         STATE.trip.session = { session_id: FIDB.newId("sess"), angler: "Nils", start_time: new Date().toISOString(),
           species_target: chosenSpecies || tripSpeciesSel.value || STATE.species,
           water_id: chosenWater || tripWaterSel.value || STATE.water,
-          spot_id: null, shore_or_boat: null, result_fish_count: 0, result_contact_count: 0 };
+          spot_id: (chosenSpot !== null ? chosenSpot : tripSpotSel.value) || null,
+          shore_or_boat: null, result_fish_count: 0, result_contact_count: 0 };
         renderTripScreen(root);
       } }, "▶ Trip starten (ohne GPS)"),
       ...(debugLine ? [debugLine] : []),

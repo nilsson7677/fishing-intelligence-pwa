@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v13"; // v13: Phase 5 Folgefix Runde 2 (Android-Realtest 22.08.2026, Testfall 5 auf echtem Geraet FAILED): explizite change-Listener + sichtbare Build-Version im Trip-Screen (nur ?tripdebug=1) zur Geraete-Diagnose — nur app.js geaendert, gleiche Dateiliste
+const CACHE_NAME = "fishintel-shell-v14"; // v14: Phase 5 Multi-Water-UX-Follow-Up (Android-Retest 22.08.2026): dritte Ebene "Spot" bereits im Trip-Start-Panel (Species -> Water -> Spot), Kuestenspots bei Meerforelle/Luebecker Bucht wieder direkt sichtbar — nur app.js geaendert, gleiche Dateiliste
 const SHELL_FILES = [
   "./",
   "./index.html",
