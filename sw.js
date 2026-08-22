@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v14"; // v14: Phase 5 Multi-Water-UX-Follow-Up (Android-Retest 22.08.2026): dritte Ebene "Spot" bereits im Trip-Start-Panel (Species -> Water -> Spot), Kuestenspots bei Meerforelle/Luebecker Bucht wieder direkt sichtbar — nur app.js geaendert, gleiche Dateiliste
+const CACHE_NAME = "fishintel-shell-v15"; // v15: Phase 5 Multi-Water-UX-Follow-Up Runde 4 (Android-Realtest 22.08.2026, dritte Ebene "Spot" auf dem Geraet weiterhin nicht sichtbar/leer): immer sichtbare Diagnosezeile im Trip-Screen (build_version/selected_species/selected_water/spots_total_in_db/spots_matching_water/trip_start_spot_element_exists/trip_start_spot_option_count, kein ?tripdebug=1 mehr noetig) + reconcileReferenceData() in seed-data.js repariert einen moeglichen stillen Referenzdaten-Drift auf Alt-Geraeten bei jedem Start — app.js + seed-data.js geaendert, gleiche Dateiliste (seed-data.js war bereits Teil des Shells)
 const SHELL_FILES = [
   "./",
   "./index.html",

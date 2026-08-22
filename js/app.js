@@ -10,15 +10,15 @@
 // dieses Flags aendert sich am normalen Nutzererlebnis nichts.
 const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug");
 
-// PHASE 5 FOLGEFIX (Android-Realtest 22.08.2026, zweite Runde — "Testfall 5 FAILED auf echtem
-// Geraet"): Build-Kennung, die im Trip-Screen sichtbar gemacht werden kann (nur ueber ?tripdebug=1,
-// analog zum VOICE_DEBUG-Muster), damit ein Geraetetest zweifelsfrei per Screenshot belegen kann,
-// WELCHER Code-Stand tatsaechlich laeuft (haeufigste Ursache fuer "Fix wirkt lokal, aber nicht auf
-// dem Handy" ist ein veralteter Service-Worker-Cache, nicht ein Logikfehler) — UNVERAENDERT am
-// normalen Nutzererlebnis, wenn das Flag fehlt. Bei jeder inhaltlichen Aenderung an
-// renderTripScreen() (js/app.js) MUSS dieser String zusammen mit sw.js CACHE_NAME angehoben werden.
-const APP_BUILD = "phase5-multiwater-ux-v14-2026-08-22";
-const TRIP_DEBUG = new URLSearchParams(window.location.search).has("tripdebug");
+// PHASE 5 FOLGEFIX (Android-Realtest 22.08.2026, Runde 2-4): Build-Kennung + Diagnosezeile im
+// Trip-Screen, damit ein Geraetetest zweifelsfrei per Screenshot belegen kann, WELCHER Code-Stand
+// tatsaechlich laeuft und ob build/Daten/Rendering die Ursache sind. Runde 2 hatte das noch hinter
+// ?tripdebug=1 versteckt (analog zum VOICE_DEBUG-Muster) — auf einer als Home-Screen-App
+// INSTALLIERTEN PWA gibt es aber i.d.R. keine editierbare Adresszeile, der Parameter war dort quasi
+// nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
+// inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
+// angehoben werden.
+const APP_BUILD = "phase5-multiwater-ux-v15-2026-08-22";
 
 const STATE = {
   view: "copilot",
@@ -41,6 +41,19 @@ async function init() {
   await FIDB.openDb();
   const seeded = await FISeed.seedIfEmpty();
   if (seeded) UI.toast("Referenzdaten geladen (Arten/Gewässer/Spots).", "success");
+  // MULTI-WATER UX FOLGEFIX Runde 4 (Android-Realtest 22.08.2026): laeuft zusaetzlich zu
+  // seedIfEmpty() bei JEDEM Start und ergaenzt fehlende species/water/spot-Eintraege gegen den
+  // aktuellen Code-Stand — heilt einen moeglichen stillen Drift, falls dieses Geraet die App schon
+  // vor einer spaeteren Erweiterung der Referenzdaten installiert hatte (IndexedDB-Objectstores
+  // werden bei einem Versions-Upgrade nie geleert/neu befuellt, siehe seed-data.js). Reiner Upsert
+  // bereits vorhandener Referenzdaten, keine neuen Spots erfunden, keine Nutzerdaten beruehrt.
+  try {
+    const reconciled = await FISeed.reconcileReferenceData();
+    if (reconciled.total > 0) {
+      console.warn("Referenzdaten-Abgleich hat fehlende Eintraege ergaenzt:", reconciled);
+      UI.toast(`Referenzdaten aktualisiert (${reconciled.total} ergänzt).`, "success");
+    }
+  } catch (e) { console.warn("Referenzdaten-Abgleich fehlgeschlagen:", e); }
 
   // USER VOCABULARY (Voice Reliability Loop Runde 2, Abschnitt 8): persoenliche Korrekturen aus
   // vorherigen Sitzungen VOR der ersten Extraktion in die Gazetteer-Tabellen einmischen, damit
@@ -721,13 +734,24 @@ function renderTripScreen(root) {
     // Gewaesser auf und aktualisiert sich SOFORT bei jedem Water-Wechsel (kein Reload noetig). Der
     // bestehende Spot-Selector im laufenden Trip (unten, "sonst"-Zweig) bleibt zusaetzlich
     // bestehen, um den Spot auch waehrend des Trips noch aendern zu koennen.
+    // FOLGEFIX Runde 4 (Android-Realtest 22.08.2026, dritte Ebene "Spot" auf dem Geraet weiterhin
+    // nicht sichtbar/leer): die Diagnosezeile war bisher hinter ?tripdebug=1 versteckt — auf einem
+    // als Home-Screen-App INSTALLIERTEN PWA gibt es aber i.d.R. KEINE editierbare Adresszeile, der
+    // Parameter war dort also praktisch nie erreichbar. Deshalb jetzt IMMER sichtbar (kein Flag
+    // mehr noetig), mit genau den angeforderten Feldern: build_version, selected_species,
+    // selected_water, spots_total_in_db, spots_matching_water, trip_start_spot_element_exists,
+    // trip_start_spot_option_count. Zusaetzlich water_ids_in_db (Bonus): zeigt die tatsaechlich in
+    // der IndexedDB vorkommenden water_id-Werte alter Spot-Datensaetze — falls ein Geraet noch
+    // Referenzdaten aus einem sehr alten Stand haette (abweichende/fehlende water_id-Werte), waere
+    // das hier sofort sichtbar. reconcileReferenceData() (seed-data.js, laeuft bei jedem App-Start)
+    // gleicht genau das jetzt zusaetzlich automatisch ab.
     let chosenSpecies = null;
     let chosenWater = null;
     let chosenSpot = null;
     const tripSpeciesSel = UI.el("select", { id: "trip-start-species", onchange: (e) => { chosenSpecies = e.target.value; updateTripDebug(); } }, []);
     const tripWaterSel = UI.el("select", { id: "trip-start-water", onchange: (e) => { chosenWater = e.target.value; chosenSpot = null; rebuildTripStartSpots(); updateTripDebug(); } }, []);
     const tripSpotSel = UI.el("select", { id: "trip-start-spot", onchange: (e) => { chosenSpot = e.target.value || null; updateTripDebug(); } }, []);
-    const debugLine = TRIP_DEBUG ? UI.el("div", { id: "trip-debug-info", class: "subtext", style: "margin-top:8px;font-family:monospace;" }, "") : null;
+    const debugLine = UI.el("div", { id: "trip-debug-info", class: "subtext", style: "margin-top:8px;font-family:monospace;white-space:pre-wrap;" }, "Diagnose laedt…");
     let allSpotsCache = null;
     function currentWaterId() { return chosenWater || tripWaterSel.value || STATE.water; }
     function rebuildTripStartSpots() {
@@ -740,10 +764,21 @@ function renderTripScreen(root) {
       updateTripDebug();
     }
     function updateTripDebug() {
-      if (!debugLine) return;
       const waterId = currentWaterId();
-      const spotCount = allSpotsCache ? allSpotsCache.filter((sp) => sp.water_id === waterId).length : "?";
-      debugLine.textContent = `Build ${APP_BUILD} · Co-Pilot-Kontext STATE.species=${STATE.species}/STATE.water=${STATE.water} · Auswahl im Panel: chosenSpecies=${chosenSpecies ?? "(noch nicht geaendert)"}/chosenWater=${chosenWater ?? "(noch nicht geaendert)"}/chosenSpot=${chosenSpot ?? "(keiner)"} · aktueller select.value: species=${tripSpeciesSel.value || "(leer)"}/water=${tripWaterSel.value || "(leer)"} · Spots zu diesem Gewaesser=${spotCount}`;
+      const spotsMatchingWater = allSpotsCache ? allSpotsCache.filter((sp) => sp.water_id === waterId).length : "lädt…";
+      const spotsTotalInDb = allSpotsCache ? allSpotsCache.length : "lädt…";
+      const distinctWaterIds = allSpotsCache ? [...new Set(allSpotsCache.map((sp) => sp.water_id))].sort().join(",") : "lädt…";
+      const elementExists = document.getElementById("trip-start-spot") !== null;
+      const optionCount = tripSpotSel.options ? tripSpotSel.options.length : 0;
+      debugLine.textContent =
+        `build_version: ${APP_BUILD}\n` +
+        `selected_species: ${chosenSpecies || tripSpeciesSel.value || STATE.species}\n` +
+        `selected_water: ${waterId}\n` +
+        `spots_total_in_db: ${spotsTotalInDb}\n` +
+        `spots_matching_water: ${spotsMatchingWater}\n` +
+        `trip_start_spot_element_exists: ${elementExists ? "ja" : "nein"}\n` +
+        `trip_start_spot_option_count: ${optionCount}\n` +
+        `water_ids_in_db (zur Kontrolle): ${distinctWaterIds}`;
     }
     Promise.all([FIDB.getAll("species"), FIDB.getAll("water"), FIDB.getAll("spot")]).then(([sp, wa, spots]) => {
       sp.forEach((s) => tripSpeciesSel.appendChild(UI.el("option", { value: s.species_id, ...(s.species_id === STATE.species ? { selected: "selected" } : {}) }, `${speciesEmoji(s.species_id)} ${s.name_de}`)));
@@ -751,7 +786,7 @@ function renderTripScreen(root) {
       allSpotsCache = spots;
       rebuildTripStartSpots();
       updateTripDebug();
-    });
+    }).catch((e) => { debugLine.textContent = `FEHLER beim Laden der Referenzdaten: ${e && e.message}`; });
     root.appendChild(UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
       UI.el("p", {}, "Standard: KEIN GPS. Ein Trip kann vollständig ohne Standort geführt werden (Start-/Endzeit, Gewässer, Spot manuell, Köder, Fänge, Nullrunde)."),
       UI.el("label", {}, "Zielart"), tripSpeciesSel,
@@ -787,16 +822,21 @@ function renderTripScreen(root) {
     ]);
     const spotSel = UI.el("select", { id: "trip-active-spot", onchange: (e) => { s.spot_id = e.target.value || null; } });
     spotSel.appendChild(UI.el("option", { value: "" }, "(kein bestimmter Spot)"));
-    const activeDebugLine = TRIP_DEBUG ? UI.el("div", { id: "trip-debug-info", class: "subtext", style: "margin-top:8px;font-family:monospace;" }, `Build ${APP_BUILD} · lade Spots…`) : null;
+    const activeDebugLine = UI.el("div", { id: "trip-debug-info", class: "subtext", style: "margin-top:8px;font-family:monospace;white-space:pre-wrap;" }, "Diagnose lädt…");
     FIDB.getAll("spot").then((spots) => {
       const matching = spots.filter((sp) => sp.water_id === s.water_id);
       matching.forEach((sp) =>
         spotSel.appendChild(UI.el("option", { value: sp.spot_id, ...(s.spot_id === sp.spot_id ? { selected: "selected" } : {}) }, sp.name)));
-      if (activeDebugLine) {
-        activeDebugLine.textContent = `Build ${APP_BUILD} · Session species_target=${s.species_target}/water_id=${s.water_id} · Spots gesamt in DB=${spots.length}, davon passend zu water_id=${matching.length} (${matching.map((sp) => sp.spot_id).join(",") || "keine"})`;
-      }
-    });
-    const spotRow = UI.el("div", { class: "panel" }, [UI.el("div", { class: "panel-label" }, "Spot (optional)"), spotSel, ...(activeDebugLine ? [activeDebugLine] : [])]);
+      activeDebugLine.textContent =
+        `build_version: ${APP_BUILD}\n` +
+        `selected_species: ${s.species_target}\n` +
+        `selected_water: ${s.water_id}\n` +
+        `spots_total_in_db: ${spots.length}\n` +
+        `spots_matching_water: ${matching.length}\n` +
+        `trip_start_spot_element_exists: n/a (aktiver Trip, kein Trip-Start-Panel mehr)\n` +
+        `trip_start_spot_option_count: n/a — aktiver Spot-Select (#trip-active-spot) hat ${spotSel.options.length} Optionen`;
+    }).catch((e) => { activeDebugLine.textContent = `FEHLER beim Laden der Spots: ${e && e.message}`; });
+    const spotRow = UI.el("div", { class: "panel" }, [UI.el("div", { class: "panel-label" }, "Spot (optional)"), spotSel, activeDebugLine]);
 
     root.appendChild(UI.el("div", { class: "panel" }, [
       UI.el("p", {}, `Trip läuft seit ${new Date(s.start_time).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}.`),
