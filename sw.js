@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v11"; // v11: Phase 5 — Regime-STATE Shadow Pilot (GO-Freigabe 19.08.2026): challenger-state.js + shadow.js neu, rein additiv/Hintergrund, kein sichtbares UI-Verhalten geaendert
+const CACHE_NAME = "fishintel-shell-v12"; // v12: Phase 5 Folgefix (Android-Realtest 22.08.2026): Trip-Start liest jetzt STATE.species/STATE.water statt water_id hartkodiert auf luebecker_bucht — nur app.js geaendert, gleiche Dateiliste
 const SHELL_FILES = [
   "./",
   "./index.html",

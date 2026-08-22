@@ -684,11 +684,30 @@ function renderTripScreen(root) {
   root.appendChild(gpsIndicator);
 
   if (!STATE.trip.active) {
+    // BUGFIX (Android-Realtest, Phase 5 Folgefix): Trip-Start hat frueher IMMER
+    // water_id:"luebecker_bucht" hartkodiert und STATE.water/STATE.species nie gelesen — der
+    // Spot-Selector im laufenden Trip filtert zwar korrekt nach s.water_id (siehe unten), aber
+    // s.water_id war nie das tatsaechlich gewuenschte Gewaesser. Root Cause war also NICHT der
+    // Spot-Filter selbst, sondern dass die Kette "Species -> Water" vor dem Spot-Filter fehlte.
+    // Fix: explizite Art-/Gewaesser-Auswahl VOR Trip-Start, vorbefuellt aus dem aktuellen
+    // Co-Pilot-Kontext (STATE.species/STATE.water) aber frei aenderbar — ein Trip kann eine andere
+    // Art/ein anderes Gewaesser als der Co-Pilot-Tab gerade zeigt. Nutzt ausschliesslich bereits
+    // vorhandene species/water-Referenzdaten (seed-data.js), keine neuen Arten/Gewaesser/Spots.
+    const tripSpeciesSel = UI.el("select", { id: "trip-start-species" }, []);
+    const tripWaterSel = UI.el("select", { id: "trip-start-water" }, []);
+    Promise.all([FIDB.getAll("species"), FIDB.getAll("water")]).then(([sp, wa]) => {
+      sp.forEach((s) => tripSpeciesSel.appendChild(UI.el("option", { value: s.species_id, ...(s.species_id === STATE.species ? { selected: "selected" } : {}) }, `${speciesEmoji(s.species_id)} ${s.name_de}`)));
+      wa.forEach((w) => tripWaterSel.appendChild(UI.el("option", { value: w.water_id, ...(w.water_id === STATE.water ? { selected: "selected" } : {}) }, w.name_de)));
+    });
     root.appendChild(UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
       UI.el("p", {}, "Standard: KEIN GPS. Ein Trip kann vollständig ohne Standort geführt werden (Start-/Endzeit, Gewässer, Spot manuell, Köder, Fänge, Nullrunde)."),
-      UI.el("button", { class: "btn btn-primary", onclick: () => {
+      UI.el("label", {}, "Zielart"), tripSpeciesSel,
+      UI.el("label", {}, "Gewässer"), tripWaterSel,
+      UI.el("button", { class: "btn btn-primary", style: "margin-top:12px;", onclick: () => {
         STATE.trip.active = true;
-        STATE.trip.session = { session_id: FIDB.newId("sess"), angler: "Nils", start_time: new Date().toISOString(), water_id: "luebecker_bucht", spot_id: null, shore_or_boat: null, result_fish_count: 0, result_contact_count: 0 };
+        STATE.trip.session = { session_id: FIDB.newId("sess"), angler: "Nils", start_time: new Date().toISOString(),
+          species_target: tripSpeciesSel.value || STATE.species, water_id: tripWaterSel.value || STATE.water,
+          spot_id: null, shore_or_boat: null, result_fish_count: 0, result_contact_count: 0 };
         renderTripScreen(root);
       } }, "▶ Trip starten (ohne GPS)"),
     ]));
@@ -706,7 +725,7 @@ function renderTripScreen(root) {
         UI.el("button", { class: `btn ${s.shore_or_boat === "boot" ? "btn-primary" : "btn-ghost"}`, onclick: () => { s.shore_or_boat = s.shore_or_boat === "boot" ? null : "boot"; renderTripScreen(root); } }, "🚤 Boot"),
       ]),
     ]);
-    const spotSel = UI.el("select", { onchange: (e) => { s.spot_id = e.target.value || null; } });
+    const spotSel = UI.el("select", { id: "trip-active-spot", onchange: (e) => { s.spot_id = e.target.value || null; } });
     spotSel.appendChild(UI.el("option", { value: "" }, "(kein bestimmter Spot)"));
     FIDB.getAll("spot").then((spots) => {
       spots.filter((sp) => sp.water_id === s.water_id).forEach((sp) =>
