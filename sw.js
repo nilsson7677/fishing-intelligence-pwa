@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v15"; // v15: Phase 5 Multi-Water-UX-Follow-Up Runde 4 (Android-Realtest 22.08.2026, dritte Ebene "Spot" auf dem Geraet weiterhin nicht sichtbar/leer): immer sichtbare Diagnosezeile im Trip-Screen (build_version/selected_species/selected_water/spots_total_in_db/spots_matching_water/trip_start_spot_element_exists/trip_start_spot_option_count, kein ?tripdebug=1 mehr noetig) + reconcileReferenceData() in seed-data.js repariert einen moeglichen stillen Referenzdaten-Drift auf Alt-Geraeten bei jedem Start — app.js + seed-data.js geaendert, gleiche Dateiliste (seed-data.js war bereits Teil des Shells)
+const CACHE_NAME = "fishintel-shell-v17"; // v17: Phase 6A "Data Safety Quick Fix" (22.08.2026) — IndexedDB v3->v4 (rein additiv, zwei neue Stores active_trip_state/trip_track), GPS-Route wird jetzt waehrend der Aufzeichnung gedrosselt + beim Stoppen/Trip-Ende final persistiert und dauerhaft mit der Session verknuepft (vorher nur im fluechtigen STATE-Objekt, Phase-6-Audit-Fund), laufender Trip uebersteht jetzt einen Reload (Recovery-Screen, kein stillschweigender Verlust), manuelles JSON-Backup/Restore in "Insights" (kein neuer Bottom-Nav-Tab), data_origin (prospective_app_own/external_contact_report) neu + rueckwirkend migriert, Kontaktmeldungen erzeugen keine Shadow-Evaluation mehr — db.js + app.js geaendert, gleiche Dateiliste (keine neue Datei im Shell noetig)
 const SHELL_FILES = [
   "./",
   "./index.html",

@@ -18,7 +18,7 @@ const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug"
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "phase5-multiwater-ux-v15-2026-08-22";
+const APP_BUILD = "phase6a-data-safety-v17-2026-08-22";
 
 const STATE = {
   view: "copilot",
@@ -30,6 +30,10 @@ const STATE = {
   voice: { provider: null, listening: false, finalizing: false, interim: "", draft: null, debugLog: [] },
   trip: { active: false, session: null, gpsMode: "off", watchId: null, track: [] },
   renderToken: 0,
+  // PHASE 6A (Data Safety Quick Fix, 22.08.2026): beim Start gefundener, noch nicht abgeschlossener
+  // Trip aus active_trip_state — solange gesetzt, zeigt der Router die Recovery-Ansicht statt der
+  // normalen View (siehe renderView()/renderTripRecoveryScreen()).
+  pendingRecovery: null,
 };
 
 const ROOT = () => document.getElementById("view-root");
@@ -63,6 +67,21 @@ async function init() {
     const userVocab = await FIDB.getAll("user_vocabulary");
     if (userVocab.length) GAZ.mergeUserVocabulary(userVocab);
   } catch (e) { console.warn("User-Vokabular konnte nicht geladen werden:", e); }
+
+  // PHASE 6A (Data Safety Quick Fix, 22.08.2026): data_origin auf bereits vorhandenen
+  // Datensaetzen nachtraeglich ergaenzen (idempotent, additiv — siehe migrateDataOriginIfNeeded()).
+  try {
+    const migratedCount = await migrateDataOriginIfNeeded();
+    if (migratedCount > 0) console.warn(`data_origin nachtraeglich ergaenzt: ${migratedCount} Datensatz/-saetze.`);
+  } catch (e) { console.warn("data_origin-Migration fehlgeschlagen:", e); }
+
+  // PHASE 6A: pruefen, ob beim letzten Schliessen der App noch ein Trip lief (active_trip_state) —
+  // falls ja, NICHT stillschweigend verwerfen oder automatisch fortsetzen, sondern dem Nutzer eine
+  // klare Recovery-Option zeigen (renderTripRecoveryScreen(), ueber STATE.pendingRecovery im Router).
+  try {
+    const activeTrip = await FIDB.get("active_trip_state", "current");
+    if (activeTrip) STATE.pendingRecovery = activeTrip;
+  } catch (e) { console.warn("Aktiver-Trip-Check fehlgeschlagen:", e); }
 
   if ("serviceWorker" in navigator) {
     // RUNDE 7 — Real-Device-Regression: { updateViaCache: "none" } sorgt dafuer, dass sw.js SELBST
@@ -119,6 +138,38 @@ function currentDayPartNow() {
   return "night";
 }
 
+// PHASE 6A (Data Safety Quick Fix, 22.08.2026): backfillt das neue Feld data_origin auf bereits
+// vorhandenen fishing_session/catch_event/intelligence_report-Datensaetzen, die vor dieser Aenderung
+// angelegt wurden. Reine additive Ein-Feld-Ergaenzung, IDEMPOTENT (ueberspringt Datensaetze, die das
+// Feld schon haben) — kein bestehendes Feld wird veraendert, kein Datensatz geloescht/neu erzeugt.
+// Regel: JEDE bisherige App-Nutzung war ausschliesslich Nils' eigene Eingabe (eine Kontaktmeldung war
+// vor Phase 6A kein eigenes, im Datenmodell unterscheidbares Konzept) — daher ist "prospective_app_own"
+// fuer fishing_session/catch_event immer korrekt. Fuer intelligence_report wird zusaetzlich der
+// bereits vorhandene source_type ausgewertet: hearsay/direct_report (Fremdbericht ueber einen
+// Kontakt) wird rueckwirkend korrekt als external_contact_report eingeordnet, nicht pauschal als
+// eigene Meldung. Siehe PHASE6A_DATA_SAFETY_IMPLEMENTATION_REPORT.md, Abschnitt "Data-Origin-Migration".
+async function migrateDataOriginIfNeeded() {
+  let migrated = 0;
+  try {
+    const sessions = await FIDB.getAll("fishing_session");
+    for (const s of sessions) {
+      if (!s.data_origin) { s.data_origin = "prospective_app_own"; await FIDB.put("fishing_session", s); migrated++; }
+    }
+    const catches = await FIDB.getAll("catch_event");
+    for (const c of catches) {
+      if (!c.data_origin) { c.data_origin = "prospective_app_own"; await FIDB.put("catch_event", c); migrated++; }
+    }
+    const reports = await FIDB.getAll("intelligence_report");
+    for (const r of reports) {
+      if (!r.data_origin) {
+        r.data_origin = (r.source_type === "hearsay" || r.source_type === "direct_report") ? "external_contact_report" : "prospective_app_own";
+        await FIDB.put("intelligence_report", r); migrated++;
+      }
+    }
+  } catch (e) { console.warn("data_origin-Migration teilweise fehlgeschlagen:", e); }
+  return migrated;
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -132,7 +183,10 @@ async function renderView() {
   const token = STATE.renderToken;
   document.querySelectorAll(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === STATE.view));
   const renderers = { copilot: viewCoPilot, angeln: viewAngeln, intelligence: viewIntelligence, gewaesser: viewGewaesser, insights: viewInsights };
-  const content = await renderers[STATE.view]();
+  // PHASE 6A: solange ein wiederherstellbarer, noch nicht abgeschlossener Trip aussteht, zeigt der
+  // Router IMMER die Recovery-Ansicht statt der normal angeforderten View — der Nutzer entscheidet
+  // dort explizit (fortsetzen/verwerfen), bevor die App normal weiterbenutzt wird.
+  const content = STATE.pendingRecovery ? await renderTripRecoveryScreen() : await renderers[STATE.view]();
   if (token !== STATE.renderToken) return; // veraltet — eine neuere Navigation hat bereits stattgefunden
   const root = ROOT();
   root.innerHTML = "";
@@ -565,9 +619,15 @@ async function viewAngeln() {
     root.appendChild(UI.el("div", { class: "empty-state" }, "Noch keine eigenen Fänge/Trips erfasst."));
   } else {
     for (const s of sessions) {
+      // PHASE 6 TEIL A (Konsolidierungsfix, Master Audit Abschnitt O #4): Ufer/Boot wird seit
+      // Phase 5 optional erfasst (s. renderTripScreen()), war bisher aber nirgends sichtbar —
+      // robustester bislang ungenutzter personal-statistischer Befund des Projekts (Winter:
+      // Boot 66,7% vs. Ufer 18,2% Fangquote). Rein informative Anzeige, FLIESST WEITERHIN NICHT in
+      // Fangindex/Champion/Challenger/Shadow-Scoring ein — reine UI-Sichtbarkeit.
+      const shoreBoatTag = s.shore_or_boat === "ufer" ? " · 🚶 Ufer" : s.shore_or_boat === "boot" ? " · 🚤 Boot" : "";
       root.appendChild(UI.el("div", { class: "inbox-item" }, [
         UI.el("div", { class: "inbox-headline" }, s.is_blank_trip ? "Nullrunde" : `${s.result_fish_count}x ${s.species_target}`),
-        UI.el("div", { class: "inbox-meta" }, `${UI.fmtDate(s.date)} · ${s.spot_id || s.water_id || "?"} · ${UI.fmtDayPart(s.day_part)}`),
+        UI.el("div", { class: "inbox-meta" }, `${UI.fmtDate(s.date)} · ${s.spot_id || s.water_id || "?"} · ${UI.fmtDayPart(s.day_part)}${shoreBoatTag}`),
       ]));
     }
   }
@@ -626,7 +686,7 @@ function renderCatchForm(root) {
         day_part: daypartSel.value, time_precision: daypartSel.value === "unknown" ? "unknown" : "approximate",
         result_fish_count: count, result_contact_count: 0, is_blank_trip: count === 0,
         notes: notesInput.value, source_quality: "A_own_verified", created_at: FIDB.nowIso(),
-        species_specific: {},
+        species_specific: {}, data_origin: "prospective_app_own", // PHASE 6A, Auftrag Punkt 9
       };
       await FIDB.put("fishing_session", session);
       if (count > 0) {
@@ -636,7 +696,7 @@ function renderCatchForm(root) {
           length_precision: lengthInput.value ? (lengthApprox.checked ? "approximate" : "exact") : "unknown",
           catch_time: null, day_part: daypartSel.value, spot_id: spotSel.value || null,
           lure_type: lureInput.value || null, lure_color: colorInput.value || null,
-          created_at: FIDB.nowIso(), species_specific: {},
+          created_at: FIDB.nowIso(), species_specific: {}, data_origin: "prospective_app_own",
         });
       }
       // Speichern + Navigation sofort; Environmental Enrichment laeuft im Hintergrund weiter
@@ -694,6 +754,74 @@ function renderObservationForm(root) {
       STATE.view = "angeln"; renderView();
     } }, "✓ Speichern"),
   ]));
+}
+
+// ---------------------------------------------------------------------------
+// PHASE 6A (Data Safety Quick Fix, 22.08.2026): Persistenz eines laufenden Trips + seiner
+// GPS-Route. Siehe PHASE6A_DATA_SAFETY_IMPLEMENTATION_REPORT.md, Abschnitt "GPS-Persistenz-Design"
+// fuer die Begruendung (eigener Store statt Einbettung in fishing_session).
+// ---------------------------------------------------------------------------
+async function persistActiveTripState() {
+  const s = STATE.trip.session;
+  if (!s) return;
+  try {
+    await FIDB.put("active_trip_state", {
+      state_id: "current", session_id: s.session_id, species_target: s.species_target,
+      water_id: s.water_id, spot_id: s.spot_id, shore_or_boat: s.shore_or_boat,
+      start_time: s.start_time, gps_mode: STATE.trip.gpsMode, updated_at: FIDB.nowIso(),
+    });
+  } catch (e) { console.warn("Aktiver-Trip-Status konnte nicht gespeichert werden:", e); }
+}
+
+async function clearActiveTripState() {
+  try { await FIDB.del("active_trip_state", "current"); } catch (e) { console.warn("Aktiver-Trip-Status konnte nicht geloescht werden:", e); }
+}
+
+// Persistiert die bisher aufgezeichnete Route GEDROSSELT (nicht bei jedem einzelnen GPS-Punkt, um
+// die IndexedDB-Schreiblast klein zu halten, siehe Implementierungsbericht) — Aufrufer entscheiden
+// selbst, wann persistiert wird (alle 5 Punkte waehrend der Aufzeichnung, IMMER beim Stoppen/
+// Trip-Ende als finaler Flush).
+async function persistTripTrack(sessionId, points) {
+  if (!sessionId) return;
+  try { await FIDB.put("trip_track", { session_id: sessionId, points: points.slice(), updated_at: FIDB.nowIso() }); }
+  catch (e) { console.warn("GPS-Track konnte nicht gespeichert werden:", e); }
+}
+
+// Recovery-Ansicht: wird vom Router (renderView()) gezeigt, solange STATE.pendingRecovery gesetzt
+// ist (ein bei App-Start gefundener active_trip_state-Eintrag). Kein stillschweigendes Verwerfen
+// UND kein automatisches Fortsetzen — der Nutzer entscheidet explizit (Auftrag Punkt 3).
+async function renderTripRecoveryScreen() {
+  const root = UI.el("div", {});
+  const rec = STATE.pendingRecovery;
+  const [speciesRec, waterRec, trackDoc] = await Promise.all([
+    FIDB.get("species", rec.species_target), FIDB.get("water", rec.water_id), FIDB.get("trip_track", rec.session_id),
+  ]);
+  const pointCount = trackDoc?.points?.length || 0;
+  root.appendChild(UI.el("h1", {}, "⚠️ Laufender Trip gefunden"));
+  root.appendChild(UI.el("div", { class: "panel" }, [
+    UI.el("div", { class: "panel-label" }, "Beim letzten Schließen der App lief noch ein Trip"),
+    UI.el("div", {}, `${speciesRec?.name_de || rec.species_target} · ${waterRec?.name_de || rec.water_id}${rec.spot_id ? " · " + rec.spot_id : ""}`),
+    UI.el("div", { class: "subtext" }, `Gestartet: ${new Date(rec.start_time).toLocaleString("de-DE")} · ${pointCount} GPS-Punkt(e) bereits gespeichert.`),
+    UI.el("div", { class: "subtext" }, "Die Routenaufzeichnung selbst muss nach dem Fortsetzen ggf. erneut gestartet werden (🔴-Button) — bereits aufgezeichnete Punkte bleiben in jedem Fall erhalten."),
+    UI.el("div", { class: "btn-row", style: "margin-top:12px;" }, [
+      UI.el("button", { class: "btn btn-primary", onclick: () => {
+        STATE.trip.session = { ...rec };
+        STATE.trip.active = true;
+        STATE.trip.track = trackDoc?.points ? trackDoc.points.slice() : [];
+        STATE.trip.gpsMode = "off";
+        STATE.trip.watchId = null;
+        STATE.pendingRecovery = null;
+        renderTripScreen(root);
+      } }, "▶ Trip fortsetzen"),
+      UI.el("button", { class: "btn btn-secondary", onclick: async () => {
+        await clearActiveTripState();
+        try { await FIDB.del("trip_track", rec.session_id); } catch (e) { console.warn("Verworfener Trip-Track konnte nicht geloescht werden:", e); }
+        STATE.pendingRecovery = null;
+        renderView();
+      } }, "✕ Verwerfen"),
+    ]),
+  ]));
+  return root;
 }
 
 // ---------------------------------------------------------------------------
@@ -792,7 +920,7 @@ function renderTripScreen(root) {
       UI.el("label", {}, "Zielart"), tripSpeciesSel,
       UI.el("label", {}, "Gewässer"), tripWaterSel,
       UI.el("label", {}, "Spot (optional)"), tripSpotSel,
-      UI.el("button", { class: "btn btn-primary", style: "margin-top:12px;", onclick: () => {
+      UI.el("button", { class: "btn btn-primary", style: "margin-top:12px;", onclick: async () => {
         // Reihenfolge bewusst: zuerst der zuletzt via change-Event festgehaltene Wert, DANN erst
         // .value als Fallback (deckt den Fall ab, dass der Nutzer den Default nie angefasst hat und
         // daher nie ein change-Event feuerte), zuletzt STATE/null als letzter Fallback.
@@ -802,6 +930,11 @@ function renderTripScreen(root) {
           water_id: chosenWater || tripWaterSel.value || STATE.water,
           spot_id: (chosenSpot !== null ? chosenSpot : tripSpotSel.value) || null,
           shore_or_boat: null, result_fish_count: 0, result_contact_count: 0 };
+        STATE.trip.track = [];
+        // PHASE 6A: Trip-Kontext + (leerer) GPS-Track sofort persistieren, damit ein Reload direkt
+        // nach dem Start nichts verliert (Auftrag Punkt 2/3).
+        await persistActiveTripState();
+        await persistTripTrack(STATE.trip.session.session_id, []);
         renderTripScreen(root);
       } }, "▶ Trip starten (ohne GPS)"),
       ...(debugLine ? [debugLine] : []),
@@ -816,11 +949,11 @@ function renderTripScreen(root) {
     const shoreBoatRow = UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
       UI.el("div", { class: "panel-label" }, "Ufer/Boot (optional)"),
       UI.el("div", { class: "btn-row" }, [
-        UI.el("button", { class: `btn ${s.shore_or_boat === "ufer" ? "btn-primary" : "btn-ghost"}`, onclick: () => { s.shore_or_boat = s.shore_or_boat === "ufer" ? null : "ufer"; renderTripScreen(root); } }, "🚶 Ufer"),
-        UI.el("button", { class: `btn ${s.shore_or_boat === "boot" ? "btn-primary" : "btn-ghost"}`, onclick: () => { s.shore_or_boat = s.shore_or_boat === "boot" ? null : "boot"; renderTripScreen(root); } }, "🚤 Boot"),
+        UI.el("button", { class: `btn ${s.shore_or_boat === "ufer" ? "btn-primary" : "btn-ghost"}`, onclick: () => { s.shore_or_boat = s.shore_or_boat === "ufer" ? null : "ufer"; persistActiveTripState(); renderTripScreen(root); } }, "🚶 Ufer"),
+        UI.el("button", { class: `btn ${s.shore_or_boat === "boot" ? "btn-primary" : "btn-ghost"}`, onclick: () => { s.shore_or_boat = s.shore_or_boat === "boot" ? null : "boot"; persistActiveTripState(); renderTripScreen(root); } }, "🚤 Boot"),
       ]),
     ]);
-    const spotSel = UI.el("select", { id: "trip-active-spot", onchange: (e) => { s.spot_id = e.target.value || null; } });
+    const spotSel = UI.el("select", { id: "trip-active-spot", onchange: (e) => { s.spot_id = e.target.value || null; persistActiveTripState(); } });
     spotSel.appendChild(UI.el("option", { value: "" }, "(kein bestimmter Spot)"));
     const activeDebugLine = UI.el("div", { id: "trip-debug-info", class: "subtext", style: "margin-top:8px;font-family:monospace;white-space:pre-wrap;" }, "Diagnose lädt…");
     FIDB.getAll("spot").then((spots) => {
@@ -845,6 +978,7 @@ function renderTripScreen(root) {
         navigator.geolocation.getCurrentPosition((pos) => {
           STATE.trip.gpsMode = "single_fix";
           STATE.trip.session.gps_lat = pos.coords.latitude; STATE.trip.session.gps_lon = pos.coords.longitude;
+          persistActiveTripState();
           UI.toast("Standort einmalig erfasst. GPS ist jetzt wieder aus.", "success");
           renderTripScreen(root);
         }, (err) => { UI.toast("Standort nicht verfügbar: " + err.message, "error"); }, { enableHighAccuracy: false, timeout: 8000 });
@@ -866,17 +1000,26 @@ function renderTripScreen(root) {
 // eine Nullrunde ist ein vollwertiger Datenpunkt, kein fehlender Wert (siehe Auftrag). Bewusst als
 // eigene App-Ansicht (nicht window.confirm/prompt) — konsistent mit dem Rest der App, blockiert
 // den Haupt-Thread nicht und laesst sich (Abbrechen) folgenlos verlassen.
-function renderTripOutcomeStep(root) {
+// PHASE 6 TEIL A (Konsolidierungsfix, Master Audit Abschnitt B/O #5): vorher hartkodiert
+// "Meerforelle gefangen?"/"Wie viele Meerforellen?" UNABHAENGIG von der tatsaechlich gewaehlten
+// Zielart (species_target) — bei Zander/Hecht/Barsch fachlich falsch. Fix: Artname wird jetzt aus
+// dem species-Store gelesen (name_de/name_de_plural, siehe seed-data.js), Fallback auf die rohe
+// species_id, falls der Datensatz ausnahmsweise fehlen sollte. Reine Text-/Anzeigeaenderung, keine
+// Aenderung an Speicherformat, Scoring oder Champion/Challenger/Shadow.
+async function renderTripOutcomeStep(root) {
   // GPS IMMER sofort stoppen, sobald "Trip beenden" angetippt wird — NICHT erst nach Beantwortung
   // der Nullrunden-Frage (Abschnitt 31, Pflicht-Testfall: kein GPS-Tracking mehr, sobald der Nutzer
   // den Beenden-Vorgang eingeleitet hat, unabhaengig davon, wie lange die Outcome-Abfrage offen
   // bleibt). finalizeTripWithOutcome() prüft denselben watchId-Guard zusätzlich defensiv.
   if (STATE.trip.watchId !== null) { navigator.geolocation.clearWatch(STATE.trip.watchId); STATE.trip.watchId = null; }
   STATE.trip.gpsMode = "off";
+  const s = STATE.trip.session;
+  const speciesRec = s ? await FIDB.get("species", s.species_target) : null;
+  const speciesLabel = speciesRec?.name_de || s?.species_target || "Fisch";
   root.innerHTML = "";
   root.appendChild(UI.el("h1", {}, "🎣 Trip beenden"));
   root.appendChild(UI.el("div", { class: "panel" }, [
-    UI.el("div", { class: "panel-label" }, "Meerforelle gefangen?"),
+    UI.el("div", { class: "panel-label" }, `${speciesLabel} gefangen?`),
     UI.el("div", { class: "btn-row" }, [
       UI.el("button", { class: "btn btn-primary", onclick: () => renderTripCatchCountStep(root) }, "✓ Ja"),
       UI.el("button", { class: "btn btn-secondary", onclick: () => finalizeTripWithOutcome(root, false, 0) }, "✕ Nein (Nullrunde)"),
@@ -886,12 +1029,15 @@ function renderTripOutcomeStep(root) {
   root.appendChild(UI.el("button", { class: "btn btn-ghost", style: "margin-top:16px;", onclick: () => renderTripScreen(root) }, "← Zurück zum laufenden Trip"));
 }
 
-function renderTripCatchCountStep(root) {
+async function renderTripCatchCountStep(root) {
+  const s = STATE.trip.session;
+  const speciesRec = s ? await FIDB.get("species", s.species_target) : null;
+  const speciesLabelPlural = speciesRec?.name_de_plural || speciesRec?.name_de || s?.species_target || "Fische";
   root.innerHTML = "";
   root.appendChild(UI.el("h1", {}, "🎣 Trip beenden"));
   const countInput = UI.el("input", { type: "number", min: "1", value: "1" });
   root.appendChild(UI.el("div", { class: "panel" }, [
-    UI.el("div", { class: "panel-label" }, "Wie viele Meerforellen?"),
+    UI.el("div", { class: "panel-label" }, `Wie viele ${speciesLabelPlural}?`),
     countInput,
     UI.el("div", { class: "btn-row", style: "margin-top:12px;" }, [
       UI.el("button", { class: "btn btn-primary", onclick: () => finalizeTripWithOutcome(root, true, Math.max(1, parseInt(countInput.value || "1", 10))) }, "✓ Speichern"),
@@ -920,7 +1066,22 @@ async function finalizeTripWithOutcome(root, caught, count) {
   s.source_quality = "A_own_verified";
   s.created_at = FIDB.nowIso();
   s.species_specific = {};
+  // PHASE 6A (Data Safety Quick Fix, 22.08.2026): Datenherkunft markieren (Auftrag Punkt 9) — ein
+  // ueber diesen Trip-Flow abgeschlossener Trip ist per Definition eine eigene, prospektive
+  // App-Erfassung. s.data_origin || ... schuetzt zusaetzlich fuer den (hier nicht erwarteten) Fall,
+  // dass schon vorher ein Wert gesetzt wurde.
+  s.data_origin = s.data_origin || "prospective_app_own";
+  // GPS-Route final + vollstaendig persistieren (nicht nur den gedrosselten Zwischenstand aus
+  // startFullTrack()) UND dauerhaft mit der Session verknuepfen (ueber die gemeinsame session_id im
+  // trip_track-Store, siehe Implementierungsbericht) — behebt den Phase-6-Audit-Fund, dass die volle
+  // Route bisher nirgends ueberlebte. Reine Zaehl-/Flag-Felder auf der Session machen die Verknuepfung
+  // ohne Zusatz-Lookup sichtbar, OHNE die Route selbst in fishing_session einzubetten.
+  await persistTripTrack(s.session_id, STATE.trip.track);
+  s.gps_track_point_count = STATE.trip.track.length;
+  s.has_gps_track = STATE.trip.track.length > 0;
   await FIDB.put("fishing_session", s);
+  // Trip ist abgeschlossen — active_trip_state (Recovery-Zustand) wird nicht mehr gebraucht.
+  await clearActiveTripState();
   UI.toast(`Trip gespeichert (${s.duration_minutes} Min., ${s.is_blank_trip ? "Nullrunde" : s.result_fish_count + " Fisch(e)"}). Umweltdaten werden im Hintergrund ergänzt…`, "success");
   const finishedSession = { ...s };
   STATE.trip = { active: false, session: null, gpsMode: "off", watchId: null, track: [] };
@@ -953,8 +1114,18 @@ async function finalizeTripWithOutcome(root, caught, count) {
 function startFullTrack(root) {
   if (!navigator.geolocation) { UI.toast("Geolocation nicht verfügbar.", "error"); return; }
   STATE.trip.gpsMode = "track";
+  persistActiveTripState();
   STATE.trip.watchId = navigator.geolocation.watchPosition(
-    (pos) => STATE.trip.track.push({ t: Date.now(), lat: pos.coords.latitude, lon: pos.coords.longitude }),
+    (pos) => {
+      STATE.trip.track.push({ t: Date.now(), lat: pos.coords.latitude, lon: pos.coords.longitude });
+      // PHASE 6A (Data Safety Quick Fix): gedrosselte Persistenz — nicht bei jedem einzelnen Punkt
+      // schreiben (IndexedDB-Schreiblast), aber regelmaessig genug, dass ein Reload waehrend der
+      // laufenden Aufzeichnung nur wenige, nicht alle Punkte kosten kann. Finaler Flush passiert in
+      // jedem Fall in stopFullTrack()/finalizeTripWithOutcome().
+      if (STATE.trip.track.length % 5 === 0 && STATE.trip.session) {
+        persistTripTrack(STATE.trip.session.session_id, STATE.trip.track);
+      }
+    },
     (err) => UI.toast("GPS-Fehler: " + err.message, "error"),
     { enableHighAccuracy: true }
   );
@@ -964,6 +1135,10 @@ function startFullTrack(root) {
 function stopFullTrack(root) {
   if (STATE.trip.watchId !== null) { navigator.geolocation.clearWatch(STATE.trip.watchId); STATE.trip.watchId = null; }
   STATE.trip.gpsMode = "off";
+  // Finaler Flush: stellt sicher, dass auch die letzten (seit dem letzten 5er-Schritt noch nicht
+  // gedrosselt gespeicherten) Punkte nicht verloren gehen.
+  if (STATE.trip.session) persistTripTrack(STATE.trip.session.session_id, STATE.trip.track);
+  persistActiveTripState();
   renderTripScreen(root);
 }
 
@@ -1209,6 +1384,11 @@ async function saveDraft(draft) {
   const report = {
     report_id: FIDB.newId("rep"),
     source_type: { hearsay_report: "hearsay", direct_report: "direct_report", trip_blank: "own_manual", catch: "own_manual" }[draft.recordType] || "own_manual",
+    // PHASE 6A (Data Safety Quick Fix, 22.08.2026, Auftrag Punkt 9/11): hearsay/direct_report sind
+    // Meldungen UEBER einen Kontakt (Fremdbericht), nicht der eigene, vollstaendig prospektiv
+    // getrackte Trip — daher external_contact_report statt prospective_app_own. Steuert u.a., ob ein
+    // Shadow-Eintrag entstehen darf (siehe enrichReportInBackground() weiter unten).
+    data_origin: { hearsay_report: "external_contact_report", direct_report: "external_contact_report", trip_blank: "prospective_app_own", catch: "prospective_app_own" }[draft.recordType] || "prospective_app_own",
     source_quality: FIExtraction.sourceQualityFor(draft), source_person: draft.sourcePerson,
     report_date: isoToday(), catch_date: draft.date.value, date_precision: draft.date.precision,
     day_part: draft.dayPart.value, time_precision: draft.dayPart.precision,
@@ -1254,7 +1434,11 @@ async function enrichReportInBackground(report, waterId, draft) {
     // Outcome werten, wenn entweder eine Fangzahl vorliegt ODER die Meldung explizit als Nullrunde
     // erkannt wurde. Sonst wird outcome_known=false protokolliert statt eine unsichere Vermutung
     // als sicheres Outcome zu verkaufen (Spezifikation, offener Punkt K.6).
-    if (window.FIShadow && report.species === "mefo" && waterId === "luebecker_bucht") {
+    // PHASE 6A (Auftrag Punkt 10/11): Kontaktmeldungen (external_contact_report) erzeugen KEINE
+    // Shadow-Evaluation — nur vollstaendig eigene, prospektive App-Erfassungen duerfen das
+    // mehrjaehrige Regime-State-Pilotprogramm speisen. shadow.js selbst bleibt unveraendert
+    // (STOP-RULE) — die zusaetzliche Bedingung gilt nur an diesem einen Aufrufort.
+    if (window.FIShadow && report.species === "mefo" && waterId === "luebecker_bucht" && report.data_origin === "prospective_app_own") {
       const hasExplicitOutcome = (report.fish_count !== null && report.fish_count !== undefined) || report.is_blank_trip === true;
       await window.FIShadow.recordShadowEvaluation({
         linkedEntityType: "intelligence_report", linkedEntityId: report.report_id,
@@ -1357,6 +1541,86 @@ async function viewGewaesser() {
 // ---------------------------------------------------------------------------
 // VIEW: Insights (MVP/Placeholder, Architektur vorbereitet — Abschnitt 36-38)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// PHASE 6A (Data Safety Quick Fix, 22.08.2026): manuelles Backup/Restore.
+// Siehe PHASE6A_DATA_SAFETY_IMPLEMENTATION_REPORT.md, Abschnitte "Backup-Schema"/"Restore-Strategie".
+// ---------------------------------------------------------------------------
+const BACKUP_FORMAT_VERSION = 1;
+// Referenzdaten (species/water/spot) und enrichment_queue werden bewusst NICHT exportiert — beide
+// sind vollstaendig reproduzierbar (Referenzdaten aus seed-data.js, enrichment_queue ist rein
+// operativer Zwischenzustand), siehe Phase-6-Architekturbericht Abschnitt 3.
+const BACKUP_STORES = [
+  "fishing_session", "catch_event", "intelligence_report", "observation",
+  "environmental_snapshot", "user_vocabulary", "shadow_evaluation", "trip_track",
+];
+
+async function buildBackupExport() {
+  const stores = {};
+  for (const name of BACKUP_STORES) stores[name] = await FIDB.getAll(name);
+  return {
+    export_format_version: BACKUP_FORMAT_VERSION,
+    schema_version: FIDB.DB_VERSION,
+    exported_at: FIDB.nowIso(),
+    app_build: APP_BUILD,
+    stores,
+  };
+}
+
+function downloadBackupFile(exportObj) {
+  const json = JSON.stringify(exportObj, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `fishing-intelligence-backup-${isoToday()}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Strukturvalidierung VOR jedem Schreibzugriff — lehnt eine falsche/inkompatible Datei sauber ab
+// (Auftrag Punkt 6), statt irgendetwas zu schreiben oder zu raten.
+function validateBackupStructure(obj) {
+  const errors = [];
+  if (!obj || typeof obj !== "object") { errors.push("Datei ist kein gültiges JSON-Objekt."); return { valid: false, errors }; }
+  if (typeof obj.export_format_version !== "number") errors.push("Fehlendes/ungültiges Feld export_format_version.");
+  else if (obj.export_format_version > BACKUP_FORMAT_VERSION) errors.push(`Backup stammt aus einer neueren App-Version (Format ${obj.export_format_version}) — diese App-Version (Format ${BACKUP_FORMAT_VERSION}) kann es nicht sicher lesen.`);
+  if (!obj.stores || typeof obj.stores !== "object") errors.push("Fehlendes/ungültiges Feld stores.");
+  else {
+    for (const [name, arr] of Object.entries(obj.stores)) {
+      if (!Array.isArray(arr)) errors.push(`stores.${name} ist keine Liste.`);
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+// Dry-Run VOR dem eigentlichen Schreiben: zeigt dem Nutzer, was gefunden wurde, bevor irgendetwas
+// geschrieben wird (Auftrag Punkt 6). Unbekannte Store-Namen (aeltere/neuere Backup-Struktur) werden
+// sauber uebersprungen, nicht als Fehler behandelt.
+async function computeRestorePreview(obj) {
+  const preview = [];
+  for (const [name, arr] of Object.entries(obj.stores || {})) {
+    if (!BACKUP_STORES.includes(name) || !Array.isArray(arr) || !FIDB.STORES[name]) continue;
+    const keyPath = FIDB.STORES[name];
+    const existing = await FIDB.getAll(name);
+    const existingKeys = new Set(existing.map((e) => e[keyPath]));
+    const neu = arr.filter((r) => !existingKeys.has(r[keyPath])).length;
+    preview.push({ store: name, total: arr.length, neu, aktualisiert: arr.length - neu });
+  }
+  return preview;
+}
+
+// Eigentlicher Restore — reiner Upsert ueber die vorhandene ID (genau wie ueberall sonst in der App,
+// siehe db.js put()), daher von Natur aus idempotent: doppelte IDs ueberschreiben denselben
+// Datensatz statt ihn zu duplizieren. Loescht NIE bestehende Daten (kein clearAll()) und ruft KEINE
+// Champion/Challenger/Shadow-Neuberechnung auf — reines Datenschreiben (Auftrag Punkt 6/10).
+async function executeRestore(obj) {
+  let written = 0;
+  for (const [name, arr] of Object.entries(obj.stores || {})) {
+    if (!BACKUP_STORES.includes(name) || !Array.isArray(arr) || !FIDB.STORES[name]) continue;
+    for (const record of arr) { await FIDB.put(name, record); written++; }
+  }
+  return written;
+}
+
 async function viewInsights() {
   const root = UI.el("div", {});
   root.appendChild(UI.el("h1", {}, "🧠 Insights"));
@@ -1370,6 +1634,74 @@ async function viewInsights() {
       UI.el("div", {}, `Eigene Trips: ${sessions.length}`), UI.el("div", {}, `Eigene Fänge: ${catches.length}`),
       UI.el("div", {}, `Intelligence-Meldungen: ${reports.length}`), UI.el("div", {}, `Beobachtungen: ${observations.length}`),
     ]),
+  ]));
+
+  // PHASE 6A (Data Safety Quick Fix): manuelles Backup/Restore — bewusst hier in "Insights" statt
+  // eines eigenen Bottom-Nav-Tabs (keine Navigation-Aenderung, siehe Sprint-3-UX-Gate-Test).
+  const lastBackupAt = (() => { try { return localStorage.getItem("fi_last_backup_at"); } catch (e) { return null; } })();
+  root.appendChild(UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
+    UI.el("div", { class: "panel-label" }, "💾 Meine Daten sichern"),
+    UI.el("div", { class: "subtext" }, "Sichert alle eigenen Trips, Fänge, Meldungen, Beobachtungen, Umweltdaten, Shadow-Vergleichsdaten und GPS-Routen in einer Datei. Referenzdaten (Arten/Gewässer/Spots) werden nicht mitgesichert — die kommen automatisch mit der App."),
+    UI.el("div", { class: "subtext" }, "⚠️ Ein Backup schützt nur dann vor Handyverlust, wenn die Datei danach von diesem Handy heruntergeladen wird — z. B. auf den Computer, in ein Cloud-Laufwerk oder per E-Mail an dich selbst. Auf dem Handy allein liegend hilft sie nicht."),
+    ...(lastBackupAt ? [UI.el("div", { class: "subtext" }, `Letzte Sicherung: ${new Date(lastBackupAt).toLocaleString("de-DE")}`)] : []),
+    UI.el("button", { class: "btn btn-primary", style: "margin-top:8px;", onclick: async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = "Sichere…";
+      try {
+        const exp = await buildBackupExport();
+        downloadBackupFile(exp);
+        try { localStorage.setItem("fi_last_backup_at", FIDB.nowIso()); } catch (e) { /* ignorieren, rein informativ */ }
+        UI.toast("Backup erstellt und heruntergeladen.", "success");
+        if (STATE.view === "insights") renderView();
+      } catch (e) {
+        UI.toast("Backup fehlgeschlagen: " + e.message, "error");
+        ev.target.disabled = false; ev.target.textContent = "💾 Meine Daten sichern";
+      }
+    } }, "💾 Meine Daten sichern"),
+  ]));
+
+  const restorePreviewSlot = UI.el("div", {});
+  const restoreInput = UI.el("input", { type: "file", accept: "application/json,.json", style: "display:none;" });
+  restoreInput.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    restorePreviewSlot.innerHTML = "";
+    let parsed;
+    try {
+      parsed = JSON.parse(await file.text());
+    } catch (err) {
+      restorePreviewSlot.appendChild(UI.el("div", { class: "uncalibrated-box" }, "Diese Datei ist kein gültiges Backup (kein lesbares JSON). Nichts wurde verändert."));
+      return;
+    }
+    const { valid, errors } = validateBackupStructure(parsed);
+    if (!valid) {
+      restorePreviewSlot.appendChild(UI.el("div", { class: "uncalibrated-box" }, "Diese Datei ist kein gültiges Fishing-Intelligence-Backup: " + errors.join(" ") + " Nichts wurde verändert."));
+      return;
+    }
+    const preview = await computeRestorePreview(parsed);
+    restorePreviewSlot.appendChild(UI.el("div", { class: "panel" }, [
+      UI.el("div", { class: "panel-label" }, "Gefunden in dieser Datei"),
+      ...(preview.length
+        ? preview.map((p) => UI.el("div", { class: "subtext" }, `${p.store}: ${p.total} Datensätze (${p.neu} neu, ${p.aktualisiert} bereits vorhanden — werden aktualisiert, nicht dupliziert)`))
+        : [UI.el("div", { class: "subtext" }, "Keine bekannten Datenstores in dieser Datei gefunden.")]),
+      UI.el("div", { class: "subtext", style: "margin-top:6px;" }, `Backup vom ${parsed.exported_at ? new Date(parsed.exported_at).toLocaleString("de-DE") : "unbekanntem Zeitpunkt"}. Bestehende Daten werden NICHT gelöscht, nur ergänzt/aktualisiert.`),
+      UI.el("div", { class: "btn-row", style: "margin-top:10px;" }, [
+        UI.el("button", { class: "btn btn-primary", onclick: async (ev) => {
+          ev.target.disabled = true; ev.target.textContent = "Stelle wieder her…";
+          const written = await executeRestore(parsed);
+          UI.toast(`Wiederhergestellt: ${written} Datensätze.`, "success");
+          restoreInput.value = "";
+          if (STATE.view === "insights") renderView();
+        } }, "✓ Jetzt wiederherstellen"),
+        UI.el("button", { class: "btn btn-secondary", onclick: () => { restoreInput.value = ""; restorePreviewSlot.innerHTML = ""; } }, "Abbrechen"),
+      ]),
+    ]));
+  });
+  root.appendChild(UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
+    UI.el("div", { class: "panel-label" }, "📥 Backup wiederherstellen"),
+    UI.el("div", { class: "subtext" }, "Wählt eine zuvor gesicherte Backup-Datei aus. Bevor etwas geschrieben wird, zeigt die App genau, was gefunden wurde."),
+    UI.el("button", { class: "btn btn-secondary", onclick: () => restoreInput.click() }, "Datei auswählen…"),
+    restoreInput,
+    restorePreviewSlot,
   ]));
 
   const tenDaysAgo = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

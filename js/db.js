@@ -12,7 +12,15 @@ const DB_NAME = "fishintel_db";
 // CHALLENGER_STATE_V1 (siehe pwa/js/shadow.js). REIN ADDITIV: kein bestehender Store, Index
 // oder Feld wird veraendert oder entfernt. Der Champion (meerforelle-model.js) bleibt die
 // einzige Logik, die in der UI sichtbar ist — shadow_evaluation wird in keiner View gelesen.
-const DB_VERSION = 3;
+// v4 (Phase 6A — Data Safety Quick Fix, 22.08.2026): zwei neue Stores, REIN ADDITIV, kein
+// bestehender Store/Index/Feld veraendert:
+//   "active_trip_state" — haelt den minimalen Zustand eines LAUFENDEN Trips (Singleton,
+//     state_id immer "current"), damit ein App-Reload waehrend eines Trips nicht stillschweigend
+//     den Trip-Kontext verliert. Bewusst GETRENNT von fishing_session, damit ein noch nicht
+//     abgeschlossener Trip nie in Inbox/Statistik/Champion-Eingaben auftaucht.
+//   "trip_track" — die vollstaendige GPS-Route eines Trips (ein Dokument pro session_id), vorher
+//     nur im fluechtigen STATE-Objekt gehalten und bei jedem Reload verloren (Phase-6-Audit-Fund).
+const DB_VERSION = 4;
 
 const STORES = {
   species: "species_id",
@@ -26,6 +34,8 @@ const STORES = {
   enrichment_queue: "queue_id",
   user_vocabulary: "vocab_id",
   shadow_evaluation: "shadow_id",
+  active_trip_state: "state_id",
+  trip_track: "session_id",
 };
 
 let _dbPromise = null;
@@ -131,4 +141,4 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-window.FIDB = { openDb, put, get, getAll, del, clearAll, newId, nowIso, STORES };
+window.FIDB = { openDb, put, get, getAll, del, clearAll, newId, nowIso, STORES, DB_VERSION };

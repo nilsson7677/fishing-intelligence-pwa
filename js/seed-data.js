@@ -16,11 +16,15 @@
 // (echte Nutzerdaten) werden hier NICHT beruehrt.
 
 function referenceRecords() {
+  // PHASE 6 TEIL A (Konsolidierungsfix, Master Audit Abschnitt B/O #5): name_de_plural ergaenzt,
+  // damit das Trip-Ende ("Wie viele X gefangen?") die tatsaechliche Zielart statt eines hartkodierten
+  // "Meerforellen" anzeigt. REIN ADDITIV (neues Feld auf bereits vorhandenen Arten-Eintraegen) —
+  // keine neue Art erfunden, keine bestehende Art veraendert/entfernt.
   const species = [
-    { species_id: "mefo", name_de: "Meerforelle", name_latin: "Salmo trutta trutta", has_calibrated_model: true },
-    { species_id: "zander", name_de: "Zander", name_latin: "Sander lucioperca", has_calibrated_model: false },
-    { species_id: "hecht", name_de: "Hecht", name_latin: "Esox lucius", has_calibrated_model: false },
-    { species_id: "barsch", name_de: "Barsch", name_latin: "Perca fluviatilis", has_calibrated_model: false },
+    { species_id: "mefo", name_de: "Meerforelle", name_de_plural: "Meerforellen", name_latin: "Salmo trutta trutta", has_calibrated_model: true },
+    { species_id: "zander", name_de: "Zander", name_de_plural: "Zander", name_latin: "Sander lucioperca", has_calibrated_model: false },
+    { species_id: "hecht", name_de: "Hecht", name_de_plural: "Hechte", name_latin: "Esox lucius", has_calibrated_model: false },
+    { species_id: "barsch", name_de: "Barsch", name_de_plural: "Barsche", name_latin: "Perca fluviatilis", has_calibrated_model: false },
   ];
   const waters = [
     { water_id: "luebecker_bucht", name_de: "Lübecker Bucht", water_type: "ostsee_kueste", enrichment_profile_id: "luebecker_bucht_v1" },
