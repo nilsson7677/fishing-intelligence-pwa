@@ -119,6 +119,10 @@ async function recordShadowEvaluation(opts) {
     };
 
     await window.FIDB.put("shadow_evaluation", entry);
+    // PHASE 6B (Cloud Backup, 26.08.2026): shadow_evaluation ist HIGH PRIORITY BACKUP (Auftrag
+    // Abschnitt 18, "darf bei Geraeteverlust nicht verschwinden") — lokal komplett folgenlos, falls
+    // FISync fehlt/fehlschlaegt (gleiches Prinzip wie der Rest dieser Funktion).
+    if (window.FISync) window.FISync.enqueue("shadow_evaluation", entry.shadow_id);
     return entry;
   } catch (e) {
     // Shadow-Logging darf NIE die produktive Fang-/Trip-Erfassung gefaehrden (gleiches Prinzip wie

@@ -190,6 +190,11 @@ async function enrich(waterId, targetDateIso, dayPart = "unknown", timePrecision
   snapshot.updated_at = FIDB.nowIso();
 
   await FIDB.put("environmental_snapshot", snapshot);
+  // PHASE 6B (Cloud Backup, 26.08.2026): environmental_snapshot ist HIGH PRIORITY BACKUP (Auftrag
+  // Abschnitt 18, spaeter nicht immer exakt reproduzierbar) — bei JEDEM Speichern zur Cloud-Sync-
+  // Queue hinzufuegen, unabhaengig vom status (auch ein "failed"-Snapshot dokumentiert, was
+  // versucht wurde). Lokal komplett folgenlos, falls FISync fehlt/fehlschlaegt (Local First).
+  if (window.FISync) window.FISync.enqueue("environmental_snapshot", snapshot.snapshot_id);
 
   if (snapshot.status !== "complete") await enqueueRetry(snapshot.snapshot_id);
   return snapshot;

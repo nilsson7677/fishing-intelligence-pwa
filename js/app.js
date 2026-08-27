@@ -18,7 +18,7 @@ const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug"
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "phase6a-data-safety-v17-2026-08-22";
+const APP_BUILD = "phase6b-cloud-backup-v18-2026-08-26";
 
 const STATE = {
   view: "copilot",
@@ -104,12 +104,22 @@ async function init() {
     btn.addEventListener("click", () => { STATE.view = btn.dataset.view; renderView(); });
   });
 
-  window.addEventListener("online", () => { updateOfflineBadge(); FIEnrichment.retryPendingQueue().then((r) => { if (r.done) UI.toast(`${r.done} Umweltdaten-Snapshot(s) nachtraeglich ergaenzt.`, "success"); }); });
+  window.addEventListener("online", () => {
+    updateOfflineBadge();
+    FIEnrichment.retryPendingQueue().then((r) => { if (r.done) UI.toast(`${r.done} Umweltdaten-Snapshot(s) nachtraeglich ergaenzt.`, "success"); });
+    // PHASE 6B (Cloud Backup): bei Wiederherstellung der Verbindung erneut synchronisieren
+    // (Auftrag Abschnitt 12) — kein Toast bei Erfolg/Misserfolg noetig, siehe Cloud-Status-Kachel
+    // in Insights (Abschnitt 14); ein Fehler hier ist niemals ein Nutzer-sichtbarer Fehler.
+    if (window.FISync) FISync.flushQueue().then((r) => { if (STATE.view === "insights") renderView(); }).catch(() => {});
+  });
   window.addEventListener("offline", updateOfflineBadge);
   updateOfflineBadge();
 
   if (navigator.onLine) {
     FIEnrichment.retryPendingQueue().then((r) => { if (r.done) UI.toast(`${r.done} Umweltdaten-Snapshot(s) nachtraeglich ergaenzt.`, "success"); });
+    // PHASE 6B (Cloud Backup): stiller Sync-Versuch bei App-Start (Auftrag Abschnitt 12) — greift
+    // nur, wenn SDK geladen, Netz vorhanden UND Nutzer eingeloggt ist; sonst folgenloser No-Op.
+    if (window.FISync) FISync.flushQueue().then(() => { if (STATE.view === "insights") renderView(); }).catch(() => {});
   }
 
   renderView();
@@ -689,15 +699,18 @@ function renderCatchForm(root) {
         species_specific: {}, data_origin: "prospective_app_own", // PHASE 6A, Auftrag Punkt 9
       };
       await FIDB.put("fishing_session", session);
+      if (window.FISync) FISync.enqueue("fishing_session", session.session_id);
       if (count > 0) {
-        await FIDB.put("catch_event", {
+        const catchEvent = {
           catch_id: FIDB.newId("catch"), session_id: session.session_id, species: speciesSel.value,
           length_cm: lengthInput.value ? parseFloat(lengthInput.value) : null,
           length_precision: lengthInput.value ? (lengthApprox.checked ? "approximate" : "exact") : "unknown",
           catch_time: null, day_part: daypartSel.value, spot_id: spotSel.value || null,
           lure_type: lureInput.value || null, lure_color: colorInput.value || null,
           created_at: FIDB.nowIso(), species_specific: {}, data_origin: "prospective_app_own",
-        });
+        };
+        await FIDB.put("catch_event", catchEvent);
+        if (window.FISync) FISync.enqueue("catch_event", catchEvent.catch_id);
       }
       // Speichern + Navigation sofort; Environmental Enrichment laeuft im Hintergrund weiter
       // (gleiche Begruendung wie bei saveDraft() — siehe Kommentar dort).
@@ -707,6 +720,7 @@ function renderCatchForm(root) {
         .then(async (snap) => {
           session.environmental_snapshot_id = snap.snapshot_id;
           await FIDB.put("fishing_session", session);
+          if (window.FISync) FISync.enqueue("fishing_session", session.session_id);
           UI.toast(`Umweltdaten für Fang: ${snap.status === "complete" ? "vollständig ergänzt" : snap.status}.`, snap.status === "failed" ? "" : "success");
           if (STATE.view === "angeln") renderView();
           // PHASE 5 (GO-Freigabe): explizites Outcome ist hier immer bekannt (Nullrunde-Checkbox
@@ -745,11 +759,13 @@ function renderObservationForm(root) {
     UI.el("button", { class: "btn btn-secondary", onclick: () => renderView() }, "Abbrechen"),
     UI.el("button", { class: "btn btn-primary", onclick: async () => {
       if (!textInput.value.trim()) { UI.toast("Bitte eine Beobachtung eintragen.", "error"); return; }
-      await FIDB.put("observation", {
+      const obs = {
         observation_id: FIDB.newId("obs"), observer: "Nils", water_id: waterSel.value, spot_id: null,
         date: dateInput.value, day_part: "unknown", text: textInput.value, category: "manuell",
         raw_transcript: textInput.value, created_at: FIDB.nowIso(),
-      });
+      };
+      await FIDB.put("observation", obs);
+      if (window.FISync) FISync.enqueue("observation", obs.observation_id);
       UI.toast("Beobachtung gespeichert.", "success");
       STATE.view = "angeln"; renderView();
     } }, "✓ Speichern"),
@@ -1077,9 +1093,16 @@ async function finalizeTripWithOutcome(root, caught, count) {
   // Route bisher nirgends ueberlebte. Reine Zaehl-/Flag-Felder auf der Session machen die Verknuepfung
   // ohne Zusatz-Lookup sichtbar, OHNE die Route selbst in fishing_session einzubetten.
   await persistTripTrack(s.session_id, STATE.trip.track);
+  // PHASE 6B (Cloud Backup): trip_track wird BEWUSST erst hier bei Trip-ENDE zur Sync-Queue
+  // hinzugefuegt, nicht waehrend der laufenden Aufzeichnung (persistTripTrack() selbst bleibt
+  // unveraendert und wird auch waehrend eines aktiven Trips aufgerufen) — siehe Begleitdokument
+  // Abschnitt 3a/6: ein Backup-Job entsteht per Definition erst, wenn ein Datensatz abgeschlossen
+  // ist ("Trip Ende -> IndexedDB -> Backup-Job", Auftrag Abschnitt 11), nicht bei jeder Zwischenstufe.
+  if (window.FISync) FISync.enqueue("trip_track", s.session_id);
   s.gps_track_point_count = STATE.trip.track.length;
   s.has_gps_track = STATE.trip.track.length > 0;
   await FIDB.put("fishing_session", s);
+  if (window.FISync) FISync.enqueue("fishing_session", s.session_id);
   // Trip ist abgeschlossen — active_trip_state (Recovery-Zustand) wird nicht mehr gebraucht.
   await clearActiveTripState();
   UI.toast(`Trip gespeichert (${s.duration_minutes} Min., ${s.is_blank_trip ? "Nullrunde" : s.result_fish_count + " Fisch(e)"}). Umweltdaten werden im Hintergrund ergänzt…`, "success");
@@ -1096,6 +1119,7 @@ async function finalizeTripWithOutcome(root, caught, count) {
     .then(async (snap) => {
       finishedSession.environmental_snapshot_id = snap.snapshot_id;
       await FIDB.put("fishing_session", finishedSession);
+      if (window.FISync) FISync.enqueue("fishing_session", finishedSession.session_id);
       if (STATE.view === "angeln") renderView();
       if (window.FIShadow) {
         await window.FIShadow.recordShadowEvaluation({
@@ -1249,6 +1273,7 @@ async function learnSpotAlias(rawToken, spotId, waterId) {
       source: "user_confirmed_fuzzy_match",
     };
     await FIDB.put("user_vocabulary", entry);
+    if (window.FISync) FISync.enqueue("user_vocabulary", entry.vocab_id);
     GAZ.mergeUserVocabulary([entry]); // sofort wirksam, nicht erst nach Neuladen der App
     UI.toast(`Gemerkt: "${rawToken}" bedeutet für dich künftig ${spotId}.`, "success");
   } catch (e) { console.warn("User-Vokabular konnte nicht gespeichert werden:", e); }
@@ -1370,11 +1395,13 @@ async function saveDraft(draft) {
 
   const waterId = draft.water.value;
   if (draft.recordType === "observation") {
-    await FIDB.put("observation", {
+    const voiceObs = {
       observation_id: FIDB.newId("obs"), observer: "Nils", water_id: waterId, spot_id: draft.spot.value,
       date: draft.date.value, day_part: draft.dayPart.value, text: draft.rawTranscript,
       category: "sprach-erfasst", raw_transcript: draft.rawTranscript, created_at: FIDB.nowIso(),
-    });
+    };
+    await FIDB.put("observation", voiceObs);
+    if (window.FISync) FISync.enqueue("observation", voiceObs.observation_id);
     UI.toast("Beobachtung gespeichert.", "success");
     STATE.voice.draft = null; STATE.voice.interim = ""; STATE.view = "intelligence";
     renderView();
@@ -1406,6 +1433,7 @@ async function saveDraft(draft) {
     enrichment_pending: !!waterId,
   };
   await FIDB.put("intelligence_report", report);
+  if (window.FISync) FISync.enqueue("intelligence_report", report.report_id);
 
   STATE.voice.draft = null; STATE.voice.interim = "";
   STATE.view = "intelligence";
@@ -1426,6 +1454,7 @@ async function enrichReportInBackground(report, waterId, draft) {
     report.environmental_snapshot_id = snap.snapshot_id;
     report.enrichment_pending = false;
     await FIDB.put("intelligence_report", report);
+    if (window.FISync) FISync.enqueue("intelligence_report", report.report_id);
     UI.toast(`Umweltdaten für "${report.species || report.record_type}"-Meldung: ${snap.status === "complete" ? "vollständig ergänzt" : snap.status}.`, snap.status === "failed" ? "" : "success");
 
     // PHASE 5 (GO-Freigabe): Voice/Text-Intelligence-Meldungen liefern nicht IMMER ein
@@ -1621,6 +1650,68 @@ async function executeRestore(obj) {
   return written;
 }
 
+// PHASE 6B (Automatic Cloud Backup, 26.08.2026): Inhalt der "☁️ Cloud-Sicherung"-Kachel in
+// Insights. Rendert je nach Status (SDK/Login/Queue) — siehe FISync.getStatus() (sync.js).
+// Keine technische Sync-Konsole (Auftrag Abschnitt 14) — nur die vier erlaubten Zustaende plus
+// Login/Logout/manueller-Sync-Button.
+async function renderCloudBackupPanel(slot) {
+  slot.innerHTML = "";
+  if (!window.FISync) {
+    slot.appendChild(UI.el("div", { class: "subtext" }, "Cloud-Sicherung ist in diesem Build nicht verfügbar. Das manuelle Backup oben funktioniert davon unabhängig weiter."));
+    return;
+  }
+  const status = await FISync.getStatus();
+
+  if (!status.loggedIn) {
+    slot.appendChild(UI.el("div", { class: "subtext" }, "Sichert eigene Trips, Fänge, Meldungen, Beobachtungen, Umweltdaten, Shadow-Vergleichsdaten und GPS-Routen zusätzlich automatisch in der Cloud (Supabase, EU-Region) — als zweite Kopie, falls das Handy verloren geht oder kaputt wird. Ersetzt das Backup oben nicht, ergänzt es."));
+    if (!status.sdkAvailable) {
+      slot.appendChild(UI.el("div", { class: "subtext" }, "⚠️ Cloud-Sicherung gerade nicht verbunden (kein Netz oder Cloud-Baustein konnte nicht geladen werden). Alle anderen Funktionen sind davon nicht betroffen."));
+    }
+    const emailInput = UI.el("input", { type: "email", placeholder: "deine@email.de", autocomplete: "email" });
+    const msgSlot = UI.el("div", { class: "subtext" });
+    slot.appendChild(UI.el("label", {}, "Anmelden per Magic Link"));
+    slot.appendChild(emailInput);
+    slot.appendChild(UI.el("button", { class: "btn btn-secondary", style: "margin-top:8px;", onclick: async (ev) => {
+      const email = emailInput.value.trim();
+      if (!email) { UI.toast("Bitte E-Mail-Adresse eingeben.", "error"); return; }
+      ev.target.disabled = true; ev.target.textContent = "Sende…";
+      const res = await FISync.signInWithMagicLink(email);
+      ev.target.disabled = false; ev.target.textContent = "Magic Link senden";
+      msgSlot.textContent = res.ok
+        ? `Link gesendet an ${email} — E-Mail öffnen und Link antippen, um dich anzumelden.`
+        : `Fehlgeschlagen: ${res.error}`;
+    } }, "Magic Link senden"));
+    slot.appendChild(msgSlot);
+    return;
+  }
+
+  // Eingeloggt: Status-Kachel gemaess Auftrag Abschnitt 14 (drei erlaubte Zustaende + Zeitstempel).
+  let line, icon;
+  if (!status.online || !status.sdkAvailable) { icon = "⚠️"; line = "Cloud-Sicherung nicht verbunden"; }
+  else if (status.pendingCount > 0) { icon = "⏳"; line = `${status.pendingCount} Eintrag${status.pendingCount === 1 ? "" : "e"} warten auf Sicherung`; }
+  else { icon = "✓"; line = "Aktuell"; }
+  slot.appendChild(UI.el("div", {}, `${icon} ${line}`));
+  if (status.lastSyncAt) {
+    slot.appendChild(UI.el("div", { class: "subtext" }, `Letzte Cloud-Sicherung: ${new Date(status.lastSyncAt).toLocaleString("de-DE")}`));
+  }
+  slot.appendChild(UI.el("div", { class: "btn-row", style: "margin-top:8px;" }, [
+    UI.el("button", { class: "btn btn-secondary", onclick: async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = "Synchronisiere…";
+      const r = await FISync.flushQueue();
+      ev.target.disabled = false; ev.target.textContent = "Jetzt synchronisieren";
+      if (r.reason === "offline") UI.toast("Kein Netz — wird automatisch nachgeholt, sobald wieder online.", "");
+      else if (r.done > 0) UI.toast(`${r.done} Eintrag${r.done === 1 ? "" : "e"} gesichert.`, "success");
+      else if (r.stillPending > 0) UI.toast("Synchronisierung teilweise fehlgeschlagen, wird später erneut versucht.", "");
+      if (STATE.view === "insights") renderView();
+    } }, "Jetzt synchronisieren"),
+    UI.el("button", { class: "btn btn-ghost", onclick: async (ev) => {
+      await FISync.signOut();
+      UI.toast("Abgemeldet. Lokale Daten sind unverändert vorhanden.", "success");
+      if (STATE.view === "insights") renderView();
+    } }, "Abmelden"),
+  ]));
+}
+
 async function viewInsights() {
   const root = UI.el("div", {});
   root.appendChild(UI.el("h1", {}, "🧠 Insights"));
@@ -1703,6 +1794,20 @@ async function viewInsights() {
     restoreInput,
     restorePreviewSlot,
   ]));
+
+  // ---------------------------------------------------------------------------
+  // PHASE 6B (Automatic Cloud Backup, 26.08.2026): automatische Cloud-Sicherung (Supabase).
+  // Ersetzt das manuelle JSON-Backup NICHT (Auftrag Abschnitt 15, Panel bleibt oben unveraendert)
+  // — bewusst als zweiter, zusaetzlicher Baustein direkt darunter. Local First: fehlt window.FISync
+  // oder das SDK, zeigt dieses Panel einfach "nicht verfügbar" an, der Rest der App bleibt
+  // unberuehrt (siehe PHASE6B_CLOUD_BACKUP_VORBEREITUNG.md).
+  // ---------------------------------------------------------------------------
+  const cloudSlot = UI.el("div", {});
+  root.appendChild(UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
+    UI.el("div", { class: "panel-label" }, "☁️ Cloud-Sicherung"),
+    cloudSlot,
+  ]));
+  await renderCloudBackupPanel(cloudSlot);
 
   const tenDaysAgo = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
   const recent = reports.filter((r) => r.catch_date && r.catch_date >= tenDaysAgo);

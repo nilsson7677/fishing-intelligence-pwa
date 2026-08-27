@@ -5,13 +5,14 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v17"; // v17: Phase 6A "Data Safety Quick Fix" (22.08.2026) — IndexedDB v3->v4 (rein additiv, zwei neue Stores active_trip_state/trip_track), GPS-Route wird jetzt waehrend der Aufzeichnung gedrosselt + beim Stoppen/Trip-Ende final persistiert und dauerhaft mit der Session verknuepft (vorher nur im fluechtigen STATE-Objekt, Phase-6-Audit-Fund), laufender Trip uebersteht jetzt einen Reload (Recovery-Screen, kein stillschweigender Verlust), manuelles JSON-Backup/Restore in "Insights" (kein neuer Bottom-Nav-Tab), data_origin (prospective_app_own/external_contact_report) neu + rueckwirkend migriert, Kontaktmeldungen erzeugen keine Shadow-Evaluation mehr — db.js + app.js geaendert, gleiche Dateiliste (keine neue Datei im Shell noetig)
+const CACHE_NAME = "fishintel-shell-v18"; // v18: Phase 6B "Automatic Cloud Backup" (26.08.2026) — IndexedDB v4->v5 (rein additiv, neuer Store sync_queue), neues js/sync.js (Supabase-Client, lokale Sync-Queue, Retry, Magic-Link-Auth, Cloud-Status), 8 Kernstores werden nach erfolgreichem lokalen Speichern zusaetzlich zur Cloud (Supabase, EU-Region) gesichert — LOCAL FIRST: Cloud-SDK wird dynamisch vom CDN geladen und blockiert nie den App-Start, jeder Cloud-Fehler bleibt lokal folgenlos. Neue "☁️ Cloud-Sicherung"-Kachel in Insights (Login/Status/manueller Sync), manuelles JSON-Backup unveraendert daneben bestehen. Champion/Fangindex/Tiers/Wasserstandsmodell/Windmodell/Spot-Ranking/Lure-Intelligence/Voice unveraendert.
 const SHELL_FILES = [
   "./",
   "./index.html",
   "./manifest.json",
   "./css/style.css",
   "./js/db.js",
+  "./js/sync.js",
   "./js/gazetteers.js",
   "./js/extractor.js",
   "./js/astro.js",

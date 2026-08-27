@@ -20,7 +20,14 @@ const DB_NAME = "fishintel_db";
 //     abgeschlossener Trip nie in Inbox/Statistik/Champion-Eingaben auftaucht.
 //   "trip_track" — die vollstaendige GPS-Route eines Trips (ein Dokument pro session_id), vorher
 //     nur im fluechtigen STATE-Objekt gehalten und bei jedem Reload verloren (Phase-6-Audit-Fund).
-const DB_VERSION = 4;
+// v5 (Phase 6B — Automatic Cloud Backup, 26.08.2026): EIN neuer Store, REIN ADDITIV, kein
+// bestehender Store/Index/Feld veraendert:
+//   "sync_queue" — rein lokale, ephemere Warteschlange fuer das Cloud-Backup (Supabase). Ein
+//     Eintrag pro noch nicht erfolgreich hochgeladenem Datensatz (queue_key = "<store>:<id>",
+//     deterministisch -> mehrfaches Aendern desselben Datensatzes erzeugt nie mehrere Eintraege).
+//     Analog zum bewaehrten "enrichment_queue"-Retry-Muster aus Sprint 2, siehe js/sync.js. Wird in
+//     KEINER View direkt gerendert und beeinflusst keine bestehende Store/Logik.
+const DB_VERSION = 5;
 
 const STORES = {
   species: "species_id",
@@ -36,6 +43,7 @@ const STORES = {
   shadow_evaluation: "shadow_id",
   active_trip_state: "state_id",
   trip_track: "session_id",
+  sync_queue: "queue_key",
 };
 
 let _dbPromise = null;
@@ -70,6 +78,9 @@ function openDb() {
             store.createIndex("by_linked", "linked_entity_id", { unique: false });
             store.createIndex("by_model_version", "model_version", { unique: false });
             store.createIndex("by_created", "timestamp_created", { unique: false });
+          }
+          if (name === "sync_queue") {
+            store.createIndex("by_store", "store", { unique: false });
           }
         }
       }
