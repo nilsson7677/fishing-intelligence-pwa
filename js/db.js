@@ -27,7 +27,16 @@ const DB_NAME = "fishintel_db";
 //     deterministisch -> mehrfaches Aendern desselben Datensatzes erzeugt nie mehrere Eintraege).
 //     Analog zum bewaehrten "enrichment_queue"-Retry-Muster aus Sprint 2, siehe js/sync.js. Wird in
 //     KEINER View direkt gerendert und beeinflusst keine bestehende Store/Logik.
-const DB_VERSION = 5;
+// v6 (Phase HI-1 — Sea Trout Hourly Intelligence Data Foundation, 30.08.2026): EIN neuer Store,
+// REIN ADDITIV, kein bestehender Store/Index/Feld veraendert:
+//   "hourly_shadow_snapshot" — eingefrorene HourlyEnvironment+HourlyFeatures-Momentaufnahmen der
+//     experimentellen, produktiv NICHT sichtbaren Hourly-Intelligence-Schattenschicht (siehe
+//     js/hourly-intelligence.js, docs/HOURLY_INTELLIGENCE_SHADOW.md). Absichtlich UNVERAENDERLICH:
+//     jeder neue Forecast-Lauf legt einen NEUEN Eintrag an (eigene id, nie ueberschrieben), damit
+//     spaeter rekonstruierbar bleibt, was die App zum jeweiligen Prognosezeitpunkt tatsaechlich
+//     wusste (Auftrag Abschnitt 14). Beeinflusst NICHT Champion-Score/-Tier und wird in KEINER
+//     produktiven View gerendert (HOURLY_INTELLIGENCE_MODE = "SHADOW").
+const DB_VERSION = 6;
 
 const STORES = {
   species: "species_id",
@@ -44,6 +53,7 @@ const STORES = {
   active_trip_state: "state_id",
   trip_track: "session_id",
   sync_queue: "queue_key",
+  hourly_shadow_snapshot: "id",
 };
 
 let _dbPromise = null;
@@ -81,6 +91,11 @@ function openDb() {
           }
           if (name === "sync_queue") {
             store.createIndex("by_store", "store", { unique: false });
+          }
+          if (name === "hourly_shadow_snapshot") {
+            store.createIndex("by_location", "locationId", { unique: false });
+            store.createIndex("by_target_timestamp", "targetTimestamp", { unique: false });
+            store.createIndex("by_generated_at", "generatedAt", { unique: false });
           }
         }
       }

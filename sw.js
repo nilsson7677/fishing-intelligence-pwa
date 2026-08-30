@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v18"; // v18: Phase 6B "Automatic Cloud Backup" (26.08.2026) — IndexedDB v4->v5 (rein additiv, neuer Store sync_queue), neues js/sync.js (Supabase-Client, lokale Sync-Queue, Retry, Magic-Link-Auth, Cloud-Status), 8 Kernstores werden nach erfolgreichem lokalen Speichern zusaetzlich zur Cloud (Supabase, EU-Region) gesichert — LOCAL FIRST: Cloud-SDK wird dynamisch vom CDN geladen und blockiert nie den App-Start, jeder Cloud-Fehler bleibt lokal folgenlos. Neue "☁️ Cloud-Sicherung"-Kachel in Insights (Login/Status/manueller Sync), manuelles JSON-Backup unveraendert daneben bestehen. Champion/Fangindex/Tiers/Wasserstandsmodell/Windmodell/Spot-Ranking/Lure-Intelligence/Voice unveraendert.
+const CACHE_NAME = "fishintel-shell-v19"; // v19: Phase HI-1 "Sea Trout Hourly Intelligence — Data Foundation & Shadow Infrastructure" (30.08.2026) — IndexedDB v5->v6 (rein additiv, neuer Store hourly_shadow_snapshot), neues js/hourly-intelligence.js (HourlyEnvironment/HourlyFeatures-Builder, Solar-/Thermal-/Wind-Shore-Features, Shadow-Hypothesis-Registry, unveraenderliche Shadow-Snapshots), additive Erweiterungen in astro.js (Sonnenhoehe) und providers.js (Wind m/s, Wellen) OHNE bestehende Methoden zu aendern. HOURLY_INTELLIGENCE_MODE = "SHADOW": rein experimentell, produktiv nirgends sichtbar/wirksam, kein Opportunity-Score, keine neue Fanggewichtung. Champion/Fangindex/Tiers/Wasserstandsmodell/Windmodell/Spot-Ranking/Lure-Intelligence/Voice unveraendert.
 const SHELL_FILES = [
   "./",
   "./index.html",
@@ -22,6 +22,7 @@ const SHELL_FILES = [
   "./js/meerforelle-model.js",
   "./js/challenger-state.js",
   "./js/shadow.js",
+  "./js/hourly-intelligence.js",
   "./js/speech.js",
   "./js/seed-data.js",
   "./js/ui.js",

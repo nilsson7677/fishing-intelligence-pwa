@@ -10,6 +10,14 @@
 // dieses Flags aendert sich am normalen Nutzererlebnis nichts.
 const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug");
 
+// PHASE HI-1 (Sea Trout Hourly Intelligence — Data Foundation & Shadow Infrastructure, 30.08.2026):
+// analog zu VOICE_DEBUG/?tripdebug=1 — nur hinter diesem Flag erscheint ein kleines, rein
+// diagnostisches Debug-Panel in Insights, das EINMALIG auf Knopfdruck einen HourlyEnvironment/
+// HourlyFeatures-Snapshot berechnet und als Rohdaten (JSON) anzeigt. Auftrag Abschnitt 19: "keine
+// grosse neue Benutzeroberflaeche", nur eine kleine Developer-Ausgabe. Zeigt NIE einen Score/eine
+// Empfehlung — HOURLY_INTELLIGENCE_MODE bleibt SHADOW (siehe js/hourly-intelligence.js).
+const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
+
 // PHASE 5 FOLGEFIX (Android-Realtest 22.08.2026, Runde 2-4): Build-Kennung + Diagnosezeile im
 // Trip-Screen, damit ein Geraetetest zweifelsfrei per Screenshot belegen kann, WELCHER Code-Stand
 // tatsaechlich laeuft und ob build/Daten/Rendering die Ursache sind. Runde 2 hatte das noch hinter
@@ -18,7 +26,7 @@ const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug"
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "phase6b-cloud-backup-v18-2026-08-26";
+const APP_BUILD = "phase-hi1-hourly-shadow-v19-2026-08-30";
 
 const STATE = {
   view: "copilot",
@@ -1835,6 +1843,37 @@ async function viewInsights() {
   root.appendChild(UI.el("div", { class: "panel-label", style: "margin-top:10px;" }, "🔎 Frag meine Angeldaten (vorbereitet, Sprint 3)"));
   root.appendChild(UI.el("input", { type: "text", placeholder: "z.B. „Was wissen wir über Zander in der Trave bei steigendem Pegel?“", disabled: "disabled" }));
   root.appendChild(UI.el("div", { class: "subtext" }, "Noch nicht funktional — Datenmodell/Provenance ist dafür bereits vorbereitet (getrennte Quellen, Confidence, Umweltdaten), die Auswertungslogik folgt erst nach ausreichender Datenbasis (Abschnitt 37/38)."));
+
+  // ---------------------------------------------------------------------------
+  // PHASE HI-1 (Sea Trout Hourly Intelligence — Data Foundation & Shadow Infrastructure,
+  // 30.08.2026): rein diagnostisches Debug-Panel, NUR sichtbar mit ?hidebug=1 (siehe HI_DEBUG oben).
+  // Berechnet auf Knopfdruck EINMALIG einen HourlyEnvironment/HourlyFeatures-Snapshot fuer das
+  // aktuell gewaehlte Gewaesser + "jetzt" und zeigt ihn als rohes JSON. Explizit KEINE Bewertung,
+  // KEIN Score, KEINE Empfehlung — HOURLY_INTELLIGENCE_MODE bleibt "SHADOW", nichts hier ist
+  // produktiv sichtbar. Auftrag Abschnitt 19 erlaubt ausdruecklich eine kleine Developer-Ausgabe.
+  // ---------------------------------------------------------------------------
+  if (HI_DEBUG && window.FIHourlyIntelligence) {
+    const hiSlot = UI.el("div", {});
+    root.appendChild(UI.el("div", { class: "panel debug-panel", style: "margin-top:14px;" }, [
+      UI.el("div", { class: "panel-label" }, `🔬 Hourly Intelligence — SHADOW (${window.FIHourlyIntelligence.HI_ENGINE_VERSION})`),
+      UI.el("div", { class: "subtext" }, `Nur Diagnose, ?hidebug=1. Modus: ${window.FIHourlyIntelligence.HOURLY_INTELLIGENCE_MODE} — beeinflusst Champion/Fangindex/Tiers nicht. Gewässer: ${STATE.water}.`),
+      UI.el("button", { class: "btn btn-secondary", style: "margin-top:6px;", onclick: async (ev) => {
+        ev.target.disabled = true; ev.target.textContent = "Berechne…";
+        try {
+          const snap = await window.FIHourlyIntelligence.buildAndPersistHourlyShadowSnapshot(STATE.water, new Date().toISOString());
+          hiSlot.innerHTML = "";
+          hiSlot.appendChild(UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "16" }, JSON.stringify(snap, null, 2)));
+        } catch (e) {
+          hiSlot.innerHTML = "";
+          hiSlot.appendChild(UI.el("div", { class: "uncalibrated-box" }, `Fehler (produktive Daten unberührt): ${e.message}`));
+        } finally {
+          ev.target.disabled = false; ev.target.textContent = "Jetzt Shadow-Snapshot berechnen";
+        }
+      } }, "Jetzt Shadow-Snapshot berechnen"),
+      hiSlot,
+    ]));
+  }
+
   return root;
 }
 

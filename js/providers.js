@@ -175,6 +175,31 @@ class OpenMeteoProvider {
     }
     return out;
   }
+
+  // NEU HI-1 (Hourly Intelligence Shadow, 30.08.2026): Windgeschwindigkeit/Boeen in ROHER SI-Einheit
+  // (m/s) statt der produktiven Beaufort-Klassifizierung oben (getHourly() bleibt UNVERAENDERT und
+  // bleibt die einzige Quelle fuer die produktive Wind-Bft-Anzeige/-Logik). Open-Meteo liefert m/s
+  // direkt per Query-Parameter (wind_speed_unit=ms) — kein Rueckrechnen aus der bereits gerundeten
+  // Bft-Klasse (das waere verlustbehaftet). Bewusst ein getrennter, zusaetzlicher Request statt in
+  // getHourly() verschmolzen (Guardrail: bestehende produktive Windlogik bleibt unangetastet).
+  async getHourlyWindMs(lat, lon, dt) {
+    const url = this._urlFor(dt);
+    const dateStr = dt.toISOString().slice(0, 10);
+    const qs = `latitude=${lat}&longitude=${lon}&hourly=wind_speed_10m,wind_gusts_10m` +
+      `&wind_speed_unit=ms&start_date=${dateStr}&end_date=${dateStr}&timezone=UTC`;
+    const res = await fetchJson(`${url}?${qs}`);
+    if (!res.ok) return { ok: false, error: res.error, windSpeedMs: null, windGustMs: null };
+    try {
+      const times = res.data.hourly.time.map((t) => Date.parse(t + "Z"));
+      const idx = nearestIndex(times, dt.getTime());
+      return {
+        ok: true, windSpeedMs: res.data.hourly.wind_speed_10m[idx], windGustMs: res.data.hourly.wind_gusts_10m[idx],
+        measured_at: res.data.hourly.time[idx],
+      };
+    } catch (e) {
+      return { ok: false, error: `Parse-Fehler: ${e.message}`, windSpeedMs: null, windGustMs: null };
+    }
+  }
 }
 
 class OpenMeteoMarineProvider {
@@ -249,6 +274,33 @@ class OpenMeteoMarineProvider {
       for (const h of hoursBackList) out[h] = { ok: false, error: `Parse-Fehler: ${e.message}` };
     }
     return out;
+  }
+
+  // NEU HI-1 (Hourly Intelligence Shadow, 30.08.2026): Wellenparameter vom bereits integrierten
+  // Marine-Endpunkt (Auftrag Abschnitt 10: "falls bestehende Datenquellen bereits liefern, ohne
+  // neue externe API" — open-meteo-marine liefert wave_height/wave_direction/wave_period am
+  // selben Endpunkt, der hier bereits fuer die Wassertemperatur genutzt wird; kein neuer Provider,
+  // keine neue Dependency, kein Risiko fuer bestehende Aufrufe). getWaterTemp()/getWaterTempTrend()/
+  // getWaterTempForecastDaily() bleiben unveraendert. Rein informativ (Rohdaten) — KEIN Fangbonus.
+  async getWaveData(lat, lon, dt) {
+    const dateStr = dt.toISOString().slice(0, 10);
+    const qs = `latitude=${lat}&longitude=${lon}&hourly=wave_height,wave_direction,wave_period&start_date=${dateStr}&end_date=${dateStr}&timezone=UTC`;
+    const res = await fetchJson(`${OM_MARINE_URL}?${qs}`);
+    if (!res.ok) return { ok: false, error: res.error, waveHeightM: null, waveDirectionDeg: null, wavePeriodSec: null };
+    try {
+      const times = res.data.hourly.time.map((t) => Date.parse(t + "Z"));
+      const idx = nearestIndex(times, dt.getTime());
+      const h = res.data.hourly.wave_height[idx], d = res.data.hourly.wave_direction[idx], p = res.data.hourly.wave_period[idx];
+      return {
+        ok: true, waveHeightM: (h === null || h === undefined) ? null : h,
+        waveDirectionDeg: (d === null || d === undefined) ? null : d,
+        wavePeriodSec: (p === null || p === undefined) ? null : p,
+        measured_at: res.data.hourly.time[idx],
+        station_or_gridpoint: `open-meteo-marine Gitterpunkt lat=${lat},lon=${lon}`,
+      };
+    } catch (e) {
+      return { ok: false, error: `Parse-Fehler: ${e.message}`, waveHeightM: null, waveDirectionDeg: null, wavePeriodSec: null };
+    }
   }
 }
 
