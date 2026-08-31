@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v18"; // v18: Phase 6B "Automatic Cloud Backup" (26.08.2026) — IndexedDB v4->v5 (rein additiv, neuer Store sync_queue), neues js/sync.js (Supabase-Client, lokale Sync-Queue, Retry, Magic-Link-Auth, Cloud-Status), 8 Kernstores werden nach erfolgreichem lokalen Speichern zusaetzlich zur Cloud (Supabase, EU-Region) gesichert — LOCAL FIRST: Cloud-SDK wird dynamisch vom CDN geladen und blockiert nie den App-Start, jeder Cloud-Fehler bleibt lokal folgenlos. Neue "☁️ Cloud-Sicherung"-Kachel in Insights (Login/Status/manueller Sync), manuelles JSON-Backup unveraendert daneben bestehen. Champion/Fangindex/Tiers/Wasserstandsmodell/Windmodell/Spot-Ranking/Lure-Intelligence/Voice unveraendert.
+const CACHE_NAME = "fishintel-shell-v20"; // v20: Phase HI-2A "Forecast Time Series & Spot Foundation" (31.08.2026) — additive Erweiterung von js/hourly-intelligence.js (120h-Batch-Forecast buildHourlyForecastSeries() mit striktem Timestamp-Matching statt N x 120 HTTP-Requests, Spot-Geo-Modell mit Provenance fuer 13 bestehende Meerforellen-Spots, computeWaveShoreFeatures + spot-relative Wind/Wellen-Features) und js/providers.js (getHourlyRangeRaw/getMarineRangeRaw als neue Batch-Methoden, Wave-Provider-Fix ueber expliziten models=dwd_ewam-Parameter statt best_match, waveSourceStatus-Feld). Zweites Debug-Panel unter ?hidebug=1 in app.js (Batch-Forecast-Coverage-Uebersicht, weiterhin rein diagnostisch). Weiterhin HOURLY_INTELLIGENCE_MODE = "SHADOW": rein experimentell, produktiv nirgends sichtbar/wirksam, kein Opportunity-Score, kein Fenster-/Spot-Ranking, keine neue Fanggewichtung. Champion/Fangindex/Tiers/Wasserstandsmodell/Windmodell/Spot-Ranking/Lure-Intelligence/Voice/Spot-Namen/-Statistiken unveraendert. v19 (Phase HI-1, 30.08.2026): IndexedDB v5->v6 (Store hourly_shadow_snapshot), Solar-/Thermal-/Wind-Shore-Features, Shadow-Hypothesis-Registry, unveraenderliche Shadow-Snapshots.
 const SHELL_FILES = [
   "./",
   "./index.html",
@@ -22,6 +22,7 @@ const SHELL_FILES = [
   "./js/meerforelle-model.js",
   "./js/challenger-state.js",
   "./js/shadow.js",
+  "./js/hourly-intelligence.js",
   "./js/speech.js",
   "./js/seed-data.js",
   "./js/ui.js",
