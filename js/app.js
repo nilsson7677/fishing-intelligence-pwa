@@ -16,6 +16,10 @@ const VOICE_DEBUG = new URLSearchParams(window.location.search).has("voicedebug"
 // HourlyFeatures-Snapshot berechnet und als Rohdaten (JSON) anzeigt. Auftrag Abschnitt 19: "keine
 // grosse neue Benutzeroberflaeche", nur eine kleine Developer-Ausgabe. Zeigt NIE einen Score/eine
 // Empfehlung — HOURLY_INTELLIGENCE_MODE bleibt SHADOW (siehe js/hourly-intelligence.js).
+// ERWEITERT in HI-2A (31.08.2026, Auftrag Abschnitt 15): ein zweiter Button unter demselben Flag
+// loest EINEN 120h-Batch-Forecast (buildHourlyForecastSeries) aus und zeigt eine Coverage-Uebersicht
+// je Feld + 4 Beispielstunden als Rohdaten. Weiterhin AUSDRUECKLICH KEINE "beste Stunde"/kein
+// Fenster-Ranking/keine Top-3-Spots/kein Score — reine Diagnose.
 const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 
 // PHASE 5 FOLGEFIX (Android-Realtest 22.08.2026, Runde 2-4): Build-Kennung + Diagnosezeile im
@@ -26,7 +30,7 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "phase-hi1-hourly-shadow-v19-2026-08-30";
+const APP_BUILD = "phase-hi2a-forecast-series-spot-geo-v20-2026-08-31";
 
 const STATE = {
   view: "copilot",
@@ -1871,6 +1875,57 @@ async function viewInsights() {
         }
       } }, "Jetzt Shadow-Snapshot berechnen"),
       hiSlot,
+    ]));
+
+    // -------------------------------------------------------------------------
+    // PHASE HI-2A (Forecast Time Series & Spot Foundation, 31.08.2026): zweiter, ebenfalls rein
+    // diagnostischer Button — loest EINEN 120h-Batch-Forecast aus (buildHourlyForecastSeries) und
+    // zeigt eine kompakte Coverage-Uebersicht + 4 Beispielstunden als rohes JSON (Auftrag Abschnitt
+    // 15). AUSDRUECKLICH NICHT: "beste Stunde"/"bestes Fenster"/Top-3-Spots/ein Score — nur
+    // Diagnose-Zaehlung, wie viele der zurueckgegebenen Stunden je Feld einen Wert != null tragen.
+    // -------------------------------------------------------------------------
+    const batchSlot = UI.el("div", {});
+    root.appendChild(UI.el("div", { class: "panel debug-panel", style: "margin-top:14px;" }, [
+      UI.el("div", { class: "panel-label" }, `🔬 Hourly Intelligence — Batch Forecast (SHADOW, ${window.FIHourlyIntelligence.HI_ENGINE_VERSION})`),
+      UI.el("div", { class: "subtext" }, `Nur Diagnose, ?hidebug=1. Loest EINEN 120h-Forecast fuer „${STATE.water}“ aus (wenige HTTP-Requests, siehe Provider-Status unten). Keine Bewertung, kein Score, kein „beste Stunde“/Top-3.`),
+      UI.el("button", { class: "btn btn-secondary", style: "margin-top:6px;", onclick: async (ev) => {
+        ev.target.disabled = true; ev.target.textContent = "Berechne Batch-Forecast…";
+        try {
+          const series = await window.FIHourlyIntelligence.buildHourlyForecastSeries(STATE.water, { horizonHours: 120 });
+          const hours = series.hours;
+          const n = hours.length;
+          const cov = (getter) => hours.filter((h) => getter(h) !== null && getter(h) !== undefined).length;
+          const coverage = {
+            "Solar (solarElevationDeg)": cov((h) => h.environment.solarElevationDeg),
+            "Lufttemperatur": cov((h) => h.environment.airTempC),
+            "Wassertemperatur": cov((h) => h.environment.waterTempC),
+            "Wind (Geschwindigkeit m/s)": cov((h) => h.environment.windSpeedMs),
+            "Wellen (Höhe)": cov((h) => h.environment.waveHeightM),
+            "Luftdruck": cov((h) => h.environment.pressureHpa),
+            "Wasserstand (nur jetzt-nah)": cov((h) => h.environment.waterLevelCm),
+          };
+          const coverageLines = Object.entries(coverage).map(([label, count]) => `  ${label}: ${count}/${n}`).join("\n");
+          const exampleIdx = [0, Math.min(24, n - 1), Math.min(72, n - 1), n - 1];
+          const examples = [...new Set(exampleIdx)].map((i) => ({ h: i, ...hours[i] }));
+          const summary = {
+            generatedAt: series.generatedAt, locationId: series.locationId, startTimestamp: series.startTimestamp,
+            horizonHours: series.horizonHours, stundenGesamt: n,
+            waveSourceStatus: series.waveSourceStatus, requestLog: series.requestLog,
+          };
+          batchSlot.innerHTML = "";
+          batchSlot.appendChild(UI.el("div", { class: "subtext", style: "margin-top:6px; white-space:pre-line;" },
+            `Feld-Abdeckung (Werte != null von ${n} Stunden):\n${coverageLines}`));
+          batchSlot.appendChild(UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "10" }, JSON.stringify(summary, null, 2)));
+          batchSlot.appendChild(UI.el("div", { class: "subtext", style: "margin-top:6px;" }, "Beispielstunden (erste, ~+24h, ~+72h, letzte) — Rohdaten:"));
+          batchSlot.appendChild(UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "20" }, JSON.stringify(examples, null, 2)));
+        } catch (e) {
+          batchSlot.innerHTML = "";
+          batchSlot.appendChild(UI.el("div", { class: "uncalibrated-box" }, `Fehler (produktive Daten unberührt): ${e.message}`));
+        } finally {
+          ev.target.disabled = false; ev.target.textContent = "120h-Batch-Forecast berechnen";
+        }
+      } }, "120h-Batch-Forecast berechnen"),
+      batchSlot,
     ]));
   }
 

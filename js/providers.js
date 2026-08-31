@@ -16,6 +16,24 @@ const OM_MARINE_URL = "https://marine-api.open-meteo.com/v1/marine";
 const OM_FLOOD_URL = "https://flood-api.open-meteo.com/v1/flood";
 const PEGEL_BASE = "https://www.pegelonline.wsv.de/webservices/rest-api/v2";
 
+// HI-2A WAVE PROVIDER AUDIT (30./31.08.2026, siehe HOURLY_INTELLIGENCE_SHADOW.md "Wave Provider
+// Audit" und PHASE_HI2A_..._REPORT.md Abschnitt D): beim ersten echten HI-1-Livetest lieferte
+// getWaveData() fuer die Luebecker Bucht durchgehend null, obwohl derselbe Request fuer
+// sea_surface_temperature erfolgreich war. Root-Cause-Recherche (Open-Meteo-Dokumentation +
+// GitHub-Issues open-meteo/open-meteo#1364 und #1166, offizielle Quelle): OHNE expliziten
+// "models"-Parameter waehlt die Marine-API automatisch "best_match" — bei Kuestenpunkten/
+// Randmeeren kann das dabei ein Wellenmodell OHNE Abdeckung fuer den angefragten Gitterpunkt
+// waehlen und liefert dann HTTP 200 mit null-Werten statt eines Fehlers (dokumentiertes,
+// bekanntes Verhalten, kein Bug in diesem Code). Empfohlener/bestaetigter Workaround aus Issue
+// #1364 (Rotterdam-Fall): expliziten Modellnamen statt "best_match" anfordern. Fuer die deutsche
+// Ostseekueste ist "dwd_ewam" (DWD EWAM, 5 km Aufloesung, Europa) das plausibelste Modell mit
+// Kuestenabdeckung — NICHT live in dieser Sandbox verifizierbar (Netzwerk blockiert, siehe
+// bekannte Einschraenkung aus Phase 6B), daher als sourcierter, aber noch nicht auf echtem
+// Geraet bestaetigter Fix markiert (siehe waveSourceStatus unten und Known Limitations im
+// Abschlussbericht). Bleibt der Wert auch mit diesem Modell null, ist "provider_null" das
+// ehrliche Ergebnis (siehe getWaveData()/getMarineRangeRaw() unten) statt eines erfundenen Werts.
+const OM_MARINE_WAVE_MODEL = "dwd_ewam";
+
 function bft(kmh) {
   const thresholds = [1, 6, 12, 20, 29, 39, 50, 62, 75, 89, 103, 118];
   for (let i = 0; i < thresholds.length; i++) if (kmh < thresholds[i]) return i;
@@ -200,6 +218,35 @@ class OpenMeteoProvider {
       return { ok: false, error: `Parse-Fehler: ${e.message}`, windSpeedMs: null, windGustMs: null };
     }
   }
+
+  // NEU HI-2A (Batch Forecast, 31.08.2026): Luft-Temp/Wind(m/s)/Wolken/Niederschlag/Druck als EINE
+  // Zeitreihe fuer einen ganzen Zeitraum — direkte Voraussetzung fuer buildHourlyForecastSeries()
+  // in hourly-intelligence.js (Auftrag Abschnitt 3/16: "keine 120×N HTTP Requests"). Ein einziger
+  // Request liefert alle fuer HourlyEnvironment/-Features benoetigten Felder inkl. Wind bereits in
+  // m/s (kein zweiter Bft-Request noetig, da diese Zeitreihe NICHT fuer die produktive
+  // Bft-Windanzeige verwendet wird). getHourly()/getHourlyWindMs() (Einzelstunde) bleiben
+  // unveraendert bestehen, diese Methode ist rein additiv.
+  async getHourlyRangeRaw(lat, lon, startDt, endDt) {
+    const url = this._urlFor(startDt);
+    const qs = `latitude=${lat}&longitude=${lon}&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation,cloud_cover,pressure_msl` +
+      `&wind_speed_unit=ms&start_date=${startDt.toISOString().slice(0, 10)}&end_date=${endDt.toISOString().slice(0, 10)}&timezone=UTC`;
+    const res = await fetchJson(`${url}?${qs}`, 15000);
+    if (!res.ok) return { ok: false, error: res.error };
+    try {
+      const timesIso = res.data.hourly.time;
+      if (!timesIso.length) return { ok: true, times: [], timesIso: [] };
+      return {
+        ok: true, times: timesIso.map((t) => Date.parse(t + "Z")), timesIso,
+        airTempC: res.data.hourly.temperature_2m, windSpeedMs: res.data.hourly.wind_speed_10m,
+        windGustMs: res.data.hourly.wind_gusts_10m, windDirDeg: res.data.hourly.wind_direction_10m,
+        precipitationMm: res.data.hourly.precipitation, cloudCoverPct: res.data.hourly.cloud_cover,
+        pressureHpa: res.data.hourly.pressure_msl,
+        station_or_gridpoint: `open-meteo Gitterpunkt lat=${lat},lon=${lon} (Batch-Zeitreihe)`,
+      };
+    } catch (e) {
+      return { ok: false, error: `Parse-Fehler: ${e.message}` };
+    }
+  }
 }
 
 class OpenMeteoMarineProvider {
@@ -276,30 +323,64 @@ class OpenMeteoMarineProvider {
     return out;
   }
 
-  // NEU HI-1 (Hourly Intelligence Shadow, 30.08.2026): Wellenparameter vom bereits integrierten
-  // Marine-Endpunkt (Auftrag Abschnitt 10: "falls bestehende Datenquellen bereits liefern, ohne
-  // neue externe API" — open-meteo-marine liefert wave_height/wave_direction/wave_period am
-  // selben Endpunkt, der hier bereits fuer die Wassertemperatur genutzt wird; kein neuer Provider,
-  // keine neue Dependency, kein Risiko fuer bestehende Aufrufe). getWaterTemp()/getWaterTempTrend()/
+  // NEU HI-1 (Hourly Intelligence Shadow, 30.08.2026), FIX HI-2A (Wave Provider Audit, siehe
+  // OM_MARINE_WAVE_MODEL-Kommentar oben): Wellenparameter vom bereits integrierten Marine-
+  // Endpunkt (Auftrag Abschnitt 10: "falls bestehende Datenquellen bereits liefern, ohne neue
+  // externe API" — open-meteo-marine liefert wave_height/wave_direction/wave_period am selben
+  // Endpunkt, der hier bereits fuer die Wassertemperatur genutzt wird; kein neuer Provider, keine
+  // neue Dependency, kein Risiko fuer bestehende Aufrufe). getWaterTemp()/getWaterTempTrend()/
   // getWaterTempForecastDaily() bleiben unveraendert. Rein informativ (Rohdaten) — KEIN Fangbonus.
+  // waveSourceStatus dokumentiert transparent, WARUM ein Wert fehlt (statt stillschweigend null).
   async getWaveData(lat, lon, dt) {
     const dateStr = dt.toISOString().slice(0, 10);
-    const qs = `latitude=${lat}&longitude=${lon}&hourly=wave_height,wave_direction,wave_period&start_date=${dateStr}&end_date=${dateStr}&timezone=UTC`;
+    const qs = `latitude=${lat}&longitude=${lon}&hourly=wave_height,wave_direction,wave_period` +
+      `&models=${OM_MARINE_WAVE_MODEL}&start_date=${dateStr}&end_date=${dateStr}&timezone=UTC`;
     const res = await fetchJson(`${OM_MARINE_URL}?${qs}`);
-    if (!res.ok) return { ok: false, error: res.error, waveHeightM: null, waveDirectionDeg: null, wavePeriodSec: null };
+    if (!res.ok) return { ok: false, error: res.error, waveHeightM: null, waveDirectionDeg: null, wavePeriodSec: null, waveSourceStatus: "request_failed" };
     try {
       const times = res.data.hourly.time.map((t) => Date.parse(t + "Z"));
+      if (!times.length) return { ok: true, waveHeightM: null, waveDirectionDeg: null, wavePeriodSec: null, waveSourceStatus: "timestamp_missing" };
       const idx = nearestIndex(times, dt.getTime());
       const h = res.data.hourly.wave_height[idx], d = res.data.hourly.wave_direction[idx], p = res.data.hourly.wave_period[idx];
+      const gotValue = h !== null && h !== undefined;
       return {
-        ok: true, waveHeightM: (h === null || h === undefined) ? null : h,
+        ok: true, waveHeightM: gotValue ? h : null,
         waveDirectionDeg: (d === null || d === undefined) ? null : d,
         wavePeriodSec: (p === null || p === undefined) ? null : p,
+        waveSourceStatus: gotValue ? "available" : "provider_null",
         measured_at: res.data.hourly.time[idx],
-        station_or_gridpoint: `open-meteo-marine Gitterpunkt lat=${lat},lon=${lon}`,
+        station_or_gridpoint: `open-meteo-marine Gitterpunkt lat=${lat},lon=${lon}, Modell ${OM_MARINE_WAVE_MODEL}`,
       };
     } catch (e) {
-      return { ok: false, error: `Parse-Fehler: ${e.message}`, waveHeightM: null, waveDirectionDeg: null, wavePeriodSec: null };
+      return { ok: false, error: `Parse-Fehler: ${e.message}`, waveHeightM: null, waveDirectionDeg: null, wavePeriodSec: null, waveSourceStatus: "request_failed" };
+    }
+  }
+
+  // NEU HI-2A (Batch Forecast, 31.08.2026): Wassertemperatur + Wellen als EINE Zeitreihe fuer
+  // einen ganzen Zeitraum (statt N Einzelabfragen pro Stunde) — direkte Voraussetzung fuer
+  // buildHourlyForecastSeries() in hourly-intelligence.js (Auftrag Abschnitt 3/16: "keine 120×N
+  // HTTP Requests"). getWaterTemp()/getWaveData() (Einzelstunde) bleiben unveraendert bestehen,
+  // diese Methode ist rein additiv.
+  async getMarineRangeRaw(lat, lon, startDt, endDt) {
+    const qs = `latitude=${lat}&longitude=${lon}&hourly=sea_surface_temperature,wave_height,wave_direction,wave_period` +
+      `&models=${OM_MARINE_WAVE_MODEL}&start_date=${startDt.toISOString().slice(0, 10)}&end_date=${endDt.toISOString().slice(0, 10)}&timezone=UTC`;
+    const res = await fetchJson(`${OM_MARINE_URL}?${qs}`, 15000);
+    if (!res.ok) return { ok: false, error: res.error, waveSourceStatus: "request_failed" };
+    try {
+      const timesIso = res.data.hourly.time;
+      if (!timesIso.length) return { ok: true, times: [], timesIso: [], waveSourceStatus: "timestamp_missing" };
+      const times = timesIso.map((t) => Date.parse(t + "Z"));
+      const waveHeightM = res.data.hourly.wave_height;
+      const anyWave = Array.isArray(waveHeightM) && waveHeightM.some((v) => v !== null && v !== undefined);
+      return {
+        ok: true, times, timesIso,
+        waterTempC: res.data.hourly.sea_surface_temperature,
+        waveHeightM, waveDirectionDeg: res.data.hourly.wave_direction, wavePeriodSec: res.data.hourly.wave_period,
+        waveSourceStatus: anyWave ? "available" : "provider_null",
+        station_or_gridpoint: `open-meteo-marine Gitterpunkt lat=${lat},lon=${lon}, Modell ${OM_MARINE_WAVE_MODEL} (Batch-Zeitreihe)`,
+      };
+    } catch (e) {
+      return { ok: false, error: `Parse-Fehler: ${e.message}`, waveSourceStatus: "request_failed" };
     }
   }
 }
