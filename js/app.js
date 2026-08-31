@@ -30,7 +30,7 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "phase-hi2a1-marine-hotfix-v21-2026-08-31";
+const APP_BUILD = "phase-hi2b-when-shadow-v22-2026-08-31";
 
 const STATE = {
   view: "copilot",
@@ -1930,6 +1930,51 @@ async function viewInsights() {
         }
       } }, "120h-Batch-Forecast berechnen"),
       batchSlot,
+    ]));
+
+    // -------------------------------------------------------------------------
+    // PHASE HI-2B (Sea Trout WHEN Shadow Engine — Hourly Opportunity & 2-3h Window Ranking,
+    // 31.08.2026): dritter, ebenfalls rein diagnostischer Button — loest EINE WHEN-Analyse
+    // (runWhenShadowAnalysis, intern EIN 120h-Batch-Forecast + lokale Tagesgruppierung/Fenster-
+    // Ranking) aus und zeigt pro lokalem Tag das beste 3h-Fenster, Alternativen, Daily Contrast und
+    // Reason Codes. AUSDRUECKLICH: SHADOW / EXPERIMENTAL / RELATIVE OPPORTUNITY — KEINE
+    // Fangwahrscheinlichkeit, KEIN "%", KEINE produktive Empfehlung (Auftrag Abschnitt 28/29).
+    // -------------------------------------------------------------------------
+    const whenSlot = UI.el("div", {});
+    root.appendChild(UI.el("div", { class: "panel debug-panel", style: "margin-top:14px;" }, [
+      UI.el("div", { class: "panel-label" }, `🔬 WHEN Intelligence — SHADOW (${window.FIHourlyWindowIntelligence ? window.FIHourlyWindowIntelligence.WHEN_ENGINE_VERSION : "?"})`),
+      UI.el("div", { class: "subtext" }, `Nur Diagnose, ?hidebug=1. EXPERIMENTAL. Loest EINE 120h-WHEN-Analyse fuer „${STATE.water}" aus. relativeOpportunity ist ein pro Tag normalisiertes, dimensionsloses Ranking-Signal — NICHT CATCH PROBABILITY, keine Fangwahrscheinlichkeit, kein Prozentwert.`),
+      UI.el("button", { class: "btn btn-secondary", style: "margin-top:6px;", onclick: async (ev) => {
+        ev.target.disabled = true; ev.target.textContent = "Berechne WHEN-Analyse…";
+        try {
+          const result = await window.FIHourlyWindowIntelligence.runWhenShadowAnalysis(STATE.water, { horizonHours: 120 });
+          whenSlot.innerHTML = "";
+          const fmtWindow = (w) => !w ? "— kein valides Fenster —" :
+            `${w.startTimestamp} → ${w.endTimestamp} (${w.durationHours}h) | relativeOpportunity=${w.windowRelativeOpportunity} (SHADOW, NICHT %) | confidence=${w.confidence} | reasons=${w.reasons.join(", ")}`;
+          for (const day of result.days) {
+            const lines = [
+              `Bestes 3h-Fenster: ${fmtWindow(day.bestWindow)}`,
+              `Daily Contrast: ${day.dailyDiagnostics.dailyContrast} (rawRange=${day.dailyDiagnostics.dayRawRange}, ${day.dailyDiagnostics.validHourCount}/${day.dailyDiagnostics.totalHourCount} Stunden mit Kerndaten)`,
+              day.alternativeWindows.length ? `Top-Alternativen: ${day.alternativeWindows.slice(0, 2).map(fmtWindow).join(" | ")}` : "Keine Alternativen (nicht-ueberlappend) gefunden.",
+            ].join("\n");
+            whenSlot.appendChild(UI.el("div", { class: "panel", style: "margin-top:8px;" }, [
+              UI.el("div", { class: "panel-label" }, `📅 ${day.localDate} (Europe/Berlin)`),
+              UI.el("div", { class: "subtext", style: "white-space:pre-line;" }, lines),
+            ]));
+          }
+          whenSlot.appendChild(UI.el("div", { class: "subtext", style: "margin-top:6px;" }, "Stuendliche Rohdaten (rawOpportunity/relativeOpportunity/solarElevation/waterTemp/lightPhase) je Tag:"));
+          whenSlot.appendChild(UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "16" },
+            JSON.stringify(result.days.map((d) => ({ localDate: d.localDate, hours: d.hours })), null, 2)));
+          whenSlot.appendChild(UI.el("div", { class: "subtext", style: "margin-top:6px;" }, "Forecast-Metadaten (Provider-Status, siehe HI-2A.1):"));
+          whenSlot.appendChild(UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "6" }, JSON.stringify(result.forecastMetadata, null, 2)));
+        } catch (e) {
+          whenSlot.innerHTML = "";
+          whenSlot.appendChild(UI.el("div", { class: "uncalibrated-box" }, `Fehler (produktive Daten unberührt): ${e.message}`));
+        } finally {
+          ev.target.disabled = false; ev.target.textContent = "120h WHEN-Analyse berechnen";
+        }
+      } }, "120h WHEN-Analyse berechnen"),
+      whenSlot,
     ]));
   }
 
