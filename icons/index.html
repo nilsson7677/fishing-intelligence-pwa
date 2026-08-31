@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0e1b26">
+<meta name="description" content="Persönlicher Angel-Entscheidungs- und Fangbuch-Co-Pilot">
+<title>Fishing Intelligence Co-Pilot</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="offline-badge" class="offline-badge hidden">📴 Offline — Speichern funktioniert, Umweltdaten folgen später</div>
+
+<main id="view-root" class="view-root"></main>
+
+<nav id="bottom-nav" class="bottom-nav">
+  <button class="nav-btn" data-view="copilot"><span class="nav-icon">🎯</span><span>Co-Pilot</span></button>
+  <button class="nav-btn" data-view="angeln"><span class="nav-icon">🎣</span><span>Angeln</span></button>
+  <button class="nav-btn" data-view="intelligence"><span class="nav-icon">🎤</span><span>Intelligence</span></button>
+  <button class="nav-btn" data-view="gewaesser"><span class="nav-icon">🗺</span><span>Gewässer</span></button>
+  <button class="nav-btn" data-view="insights"><span class="nav-icon">🧠</span><span>Insights</span></button>
+</nav>
+
+<div id="toast-root" class="toast-root"></div>
+
+<!-- Reihenfolge wichtig: db.js vor allem, was FIDB nutzt. meerforelle-model.js VOR gazetteers.js
+     (Voice Reliability Loop Runde 2): gazetteers.js leitet die Spot-Aliase jetzt aus
+     FIMefoModel.SPOT_STATS ab (eine zentrale Quelle statt zweier gepflegter Listen), braucht das
+     Modell also schon beim Laden. gazetteers/extractor/astro/providers/registry weiterhin vor
+     enrichment.js. -->
+<script src="js/db.js"></script>
+<script src="js/sync.js"></script>
+<script src="js/meerforelle-model.js"></script>
+<script src="js/challenger-state.js"></script>
+<script src="js/gazetteers.js"></script>
+<script src="js/extractor.js"></script>
+<script src="js/astro.js"></script>
+<script src="js/providers.js"></script>
+<script src="js/registry.js"></script>
+<script src="js/enrichment.js"></script>
+<script src="js/shadow.js"></script>
+<script src="js/hourly-intelligence.js"></script>
+<script src="js/seed-data.js"></script>
+<script src="js/speech.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
