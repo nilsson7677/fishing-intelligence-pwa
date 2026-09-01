@@ -802,4 +802,12 @@ window.FIProviders = {
   // fuer automatisierte Tests, analog zu bft()/analyzeWaterLevelPhase() (bereits exportierte reine
   // Helper). Kein produktiver Aufrufer ausserhalb von providers.js selbst noetig.
   _isOutsideKnownCoverage,
+  // NEU (Phase HI-2C, 31.08.2026): circularMeanDeg() existierte bereits intern (genutzt in diesem
+  // File fuer Windrichtungs-Mittelung), war aber bisher NICHT exportiert. HI-2C's
+  // where-spot-intelligence.js (aggregateWindowConditions, Auftrag Abschnitt 9: "zirkulaere
+  // Statistik mandatory") ruft window.FIProviders.circularMeanDeg direkt auf, um denselben bereits
+  // vorhandenen, unveraenderten Algorithmus wiederzuverwenden statt ihn zu duplizieren (Guardrail:
+  // kein neuer Geometrie-/Statistik-Code). Rein additiver Export, keine Verhaltensaenderung an
+  // circularMeanDeg selbst oder an irgendeinem bestehenden Aufrufer.
+  circularMeanDeg,
 };

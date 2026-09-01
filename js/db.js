@@ -44,7 +44,16 @@ const DB_NAME = "fishintel_db";
 //     HOURLY_INTELLIGENCE_SHADOW.md Abschnitt HI-2B). Absichtlich NICHT die volle 121h-Rohserie.
 //     Beeinflusst NICHT Champion-Score/-Tier und wird in KEINER produktiven View gerendert
 //     (HOURLY_INTELLIGENCE_MODE = "SHADOW", ALLOW_AUTOMATIC_PROMOTION = false).
-const DB_VERSION = 7;
+// v8 (Phase HI-2C — Sea Trout WHERE Shadow Engine, 31.08.2026): EIN neuer Store, REIN ADDITIV, kein
+// bestehender Store/Index/Feld veraendert:
+//   "where_spot_shadow_prediction" — minimales, UNVERAENDERLICHES Prediction-Artefakt (Top-3-Spots +
+//     unrankable Spots + Spot-Contrast + Forecast-Metadaten) pro HI-2B-Fenster mit validem Ergebnis,
+//     nur fuer mefo x luebecker_bucht x shore (siehe js/where-spot-intelligence.js,
+//     HOURLY_INTELLIGENCE_SHADOW.md Abschnitt HI-2C). Liest NIE SPOT_STATS-Fangquoten (rohquote/
+//     shrunk/n) — nur Spot-IDs. Beeinflusst NICHT Champion-/SPOT_STATS-Score und wird in KEINER
+//     produktiven View gerendert (WHERE_INTELLIGENCE_MODE = "SHADOW",
+//     ALLOW_PRODUCTION_SPOT_RANKING_MUTATION = false).
+const DB_VERSION = 8;
 
 const STORES = {
   species: "species_id",
@@ -63,6 +72,7 @@ const STORES = {
   sync_queue: "queue_key",
   hourly_shadow_snapshot: "id",
   hourly_window_shadow_prediction: "id",
+  where_spot_shadow_prediction: "id",
 };
 
 let _dbPromise = null;
@@ -108,6 +118,11 @@ function openDb() {
           }
           if (name === "hourly_window_shadow_prediction") {
             store.createIndex("by_location", "locationId", { unique: false });
+            store.createIndex("by_local_date", "localDate", { unique: false });
+            store.createIndex("by_generated_at", "generatedAt", { unique: false });
+          }
+          if (name === "where_spot_shadow_prediction") {
+            store.createIndex("by_water", "waterId", { unique: false });
             store.createIndex("by_local_date", "localDate", { unique: false });
             store.createIndex("by_generated_at", "generatedAt", { unique: false });
           }

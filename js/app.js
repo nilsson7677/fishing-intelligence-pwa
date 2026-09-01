@@ -30,7 +30,7 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "phase-hi2b-when-shadow-v22-2026-08-31";
+const APP_BUILD = "phase-hi2c-where-shadow-v23-2026-08-31";
 
 const STATE = {
   view: "copilot",
@@ -1976,6 +1976,83 @@ async function viewInsights() {
       } }, "120h WHEN-Analyse berechnen"),
       whenSlot,
     ]));
+
+    // -------------------------------------------------------------------------
+    // PHASE HI-2C (Sea Trout WHERE Shadow Engine — Dynamic Spot Suitability & Top-3, 31.08.2026):
+    // vierter, ebenfalls rein diagnostischer Button — loest EINE WHERE-Analyse
+    // (runWhereShadowAnalysis, nutzt intern denselben 120h-Batch-Forecast + die bereits vorhandene
+    // HI-2B-Rankingfunktion, KEIN zweiter Netzwerk-Request) aus und zeigt pro lokalem Tag das
+    // beste WHEN-Fenster und die dazugehoerigen Top-3-Spots. Nur mefo x luebecker_bucht x shore
+    // (Auftrag Abschnitt 3) — ein "Boot"-Toggle demonstriert bewusst den unsupported/not_applicable-
+    // Pfad. AUSDRUECKLICH: SHADOW / EXPERIMENTAL / RELATIVE SPOT SUITABILITY — KEINE
+    // Fangwahrscheinlichkeit, KEIN "%", KEINE historischen SPOT_STATS-Fangquoten im Score
+    // (Auftrag Abschnitt 21/28/30/31/38).
+    // -------------------------------------------------------------------------
+    if (window.FIWhereIntelligence) {
+      const whereSlot = UI.el("div", {});
+      let whereFishingMode = "shore";
+      const modeBtnSlot = UI.el("div", { style: "margin-top:6px;" });
+      const renderModeBtns = () => {
+        modeBtnSlot.innerHTML = "";
+        modeBtnSlot.appendChild(UI.el("button", { class: `btn ${whereFishingMode === "shore" ? "btn-primary" : "btn-ghost"}`,
+          style: "margin-right:6px;",
+          onclick: () => { whereFishingMode = "shore"; renderModeBtns(); } }, "🚶 Ufer (unterstützt)"));
+        modeBtnSlot.appendChild(UI.el("button", { class: `btn ${whereFishingMode === "boat" ? "btn-primary" : "btn-ghost"}`,
+          onclick: () => { whereFishingMode = "boat"; renderModeBtns(); } }, "🚤 Boot (zeigt not_applicable)"));
+      };
+      renderModeBtns();
+      root.appendChild(UI.el("div", { class: "panel debug-panel", style: "margin-top:14px;" }, [
+        UI.el("div", { class: "panel-label" }, `🗺 WHERE Intelligence — SHADOW (${window.FIWhereIntelligence.WHERE_ENGINE_VERSION})`),
+        UI.el("div", { class: "subtext" }, `Nur Diagnose, ?hidebug=1. EXPERIMENTAL. Loest EINE WHERE-Analyse fuer „${STATE.water}" (Art: ${STATE.species}) aus, aufbauend auf der 120h-WHEN-Analyse. relativeSuitability ist ein pro Fenster normalisiertes, dimensionsloses Ranking-Signal — NICHT CATCH PROBABILITY, keine Fangwahrscheinlichkeit, kein Prozentwert, KEINE historische Spot-Fangquote.`),
+        modeBtnSlot,
+        UI.el("button", { class: "btn btn-secondary", style: "margin-top:6px;", onclick: async (ev) => {
+          ev.target.disabled = true; ev.target.textContent = "Berechne WHERE-Analyse…";
+          try {
+            const result = await window.FIWhereIntelligence.runWhereShadowAnalysis(STATE.water, STATE.species, whereFishingMode, { horizonHours: 120 });
+            whereSlot.innerHTML = "";
+            if (!result.supported) {
+              whereSlot.appendChild(UI.el("div", { class: "uncalibrated-box" },
+                `unsupported / not_applicable — ${result.reasons.join("; ")}`));
+            } else {
+              const fmtSpot = (s, rank) => `${rank}. ${s.spotId} | relativeSuitability=${s.relativeSuitability} (SHADOW, NICHT %) | confidence=${s.confidence} | reasons=${s.reasonCodes.join(", ")}`;
+              for (const day of result.days) {
+                if (!day.bestWhere) {
+                  whereSlot.appendChild(UI.el("div", { class: "panel", style: "margin-top:8px;" }, [
+                    UI.el("div", { class: "panel-label" }, `📅 ${day.localDate} (Europe/Berlin)`),
+                    UI.el("div", { class: "subtext" }, "Kein valides WHEN-Fenster an diesem Tag — keine WHERE-Analyse möglich."),
+                  ]));
+                  continue;
+                }
+                const top3 = day.bestWhere.top3;
+                const lines = [
+                  `WHEN: ${day.bestWhere.startTimestamp} → ${day.bestWhere.endTimestamp} (${day.bestWhere.durationHours}h)`,
+                  `Fenster-Bedingungen: Wind ${day.bestWhere.windowConditions.windSpeedMsMedian ?? "?"} m/s aus ${day.bestWhere.windowConditions.windDirectionDegCircularMean ?? "?"}°, Welle ${day.bestWhere.windowConditions.waveHeightMMedian ?? "?"} m aus ${day.bestWhere.windowConditions.waveDirectionDegCircularMean ?? "?"}° / ${day.bestWhere.windowConditions.wavePeriodSecMedian ?? "?"} s`,
+                  top3.topSpots.length ? `Shadow WHERE:\n${top3.topSpots.map((s, i) => "  " + fmtSpot(s, i + 1)).join("\n")}` : "Keine rankbaren Spots (siehe unrankableSpots).",
+                  `Spot Contrast: ${top3.spotContrast}`,
+                  top3.unrankableSpots.length ? `Nicht rankbar: ${top3.unrankableSpots.map((s) => s.spotId).join(", ")}` : "Alle betrachteten Spots rankbar.",
+                  `H3 (Summer Deep/Current Exception): ${top3.diagnostics.h3Status}`,
+                ].join("\n");
+                whereSlot.appendChild(UI.el("div", { class: "panel", style: "margin-top:8px;" }, [
+                  UI.el("div", { class: "panel-label" }, `📅 ${day.localDate} (Europe/Berlin)`),
+                  UI.el("div", { class: "subtext", style: "white-space:pre-line;" }, lines),
+                ]));
+              }
+              whereSlot.appendChild(UI.el("div", { class: "subtext", style: "margin-top:6px;" }, "Vollständige Tagesergebnisse (physicalFeatures, biologicalRules, missingData je Spot):"));
+              whereSlot.appendChild(UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "16" },
+                JSON.stringify(result.days.map((d) => ({ localDate: d.localDate, bestWhere: d.bestWhere })), null, 2)));
+              whereSlot.appendChild(UI.el("div", { class: "subtext", style: "margin-top:6px;" }, "Forecast-Metadaten:"));
+              whereSlot.appendChild(UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "6" }, JSON.stringify(result.forecastMetadata, null, 2)));
+            }
+          } catch (e) {
+            whereSlot.innerHTML = "";
+            whereSlot.appendChild(UI.el("div", { class: "uncalibrated-box" }, `Fehler (produktive Daten unberührt): ${e.message}`));
+          } finally {
+            ev.target.disabled = false; ev.target.textContent = "WHERE-Analyse berechnen";
+          }
+        } }, "WHERE-Analyse berechnen"),
+        whereSlot,
+      ]));
+    }
   }
 
   return root;
