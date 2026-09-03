@@ -30,7 +30,7 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "phase-hi2c-where-shadow-v23-2026-08-31";
+const APP_BUILD = "phase-hi2c1-spot-metadata-v24-2026-09-03";
 
 const STATE = {
   view: "copilot",
@@ -2052,6 +2052,36 @@ async function viewInsights() {
         } }, "WHERE-Analyse berechnen"),
         whereSlot,
       ]));
+    }
+
+    // -------------------------------------------------------------------------
+    // PHASE HI-2C.1 (Sea Trout Spot Intelligence Metadata Layer, 03.09.2026): rein diagnostischer
+    // Viewer fuer die neue, reine Datenschicht js/spot-intelligence-data.js (window.
+    // FISpotIntelligenceData). Zeigt AUSSCHLIESSLICH beschreibende physikalische/geografische
+    // Metadaten (Geometrie/Bathymetrie/Substrat/Habitat/kuenstliche Struktur/Ufer-Zugriffsprofil/
+    // Evidenz/Unknowns) fuer einen ausgewaehlten Spot als rohes JSON — KEIN Rating, KEIN Bonus,
+    // KEINE Fangwahrscheinlichkeit, KEINE Empfehlung, KEIN Rang (Auftrag Abschnitt 45). Rein
+    // synchron, kein Netzwerk-/DB-Zugriff, keine Interaktion mit Champion/HI-2B/HI-2C-Scoring.
+    // -------------------------------------------------------------------------
+    if (window.FISpotIntelligenceData) {
+      const spotSlot = UI.el("div", { style: "margin-top:8px;" });
+      const spotIds = window.FISpotIntelligenceData.listSpotIds();
+      const renderSpot = (spotId) => {
+        const spot = window.FISpotIntelligenceData.getSpotIntelligence(spotId);
+        spotSlot.innerHTML = "";
+        spotSlot.appendChild(UI.el("textarea", { readonly: "true", class: "debug-log-textarea", rows: "20" },
+          JSON.stringify(spot, null, 2)));
+      };
+      const select = UI.el("select", { class: "input", onchange: (ev) => renderSpot(ev.target.value) },
+        spotIds.map((id) => UI.el("option", { value: id }, `${id} — ${window.FISpotIntelligenceData.getSpotIntelligence(id).name}`))
+      );
+      root.appendChild(UI.el("div", { class: "panel debug-panel", style: "margin-top:14px;" }, [
+        UI.el("div", { class: "panel-label" }, `🧭 Spot Intelligence Metadata (${window.FISpotIntelligenceData.SPOT_INTELLIGENCE_VERSION})`),
+        UI.el("div", { class: "subtext" }, `Nur Diagnose, ?hidebug=1. scoringImpact=„${window.FISpotIntelligenceData.SPOT_INTELLIGENCE_SCORING_IMPACT}" — reine physikalische Spot-Metadaten (${spotIds.length} Spots), KEIN Rating, KEIN Bonus, KEINE Fangwahrscheinlichkeit, KEINE Empfehlung, KEIN Rang. Quelle: ${window.FISpotIntelligenceData.SPOT_INTELLIGENCE_GENERATED_FROM}.`),
+        select,
+        spotSlot,
+      ]));
+      if (spotIds.length) renderSpot(spotIds[0]);
     }
   }
 
