@@ -221,6 +221,14 @@ body.is-offline .view-root { padding-top: calc(40px + var(--safe-top)); }
 .details-toggle { display: flex; align-items: center; justify-content: space-between; background: var(--panel); border: 1px dashed #3a5a72; border-radius: 12px; padding: 12px 14px; font-size: 13px; color: var(--text-dim); margin-bottom: 12px; cursor: pointer; }
 .details-body.hidden { display: none; }
 
+/* ---------- Product Finish Sprint: Lohnt es sich/Wann/Wo/Was/Warum ---------- */
+.hero-index-line { font-size: 13px; color: var(--text-dim); margin-bottom: 4px; }
+.wo-line { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+.was-line { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.warum-list li.warum-shadow { color: var(--accent-yellow); }
+.outlook-day-row { padding: 8px 0; border-bottom: 1px solid var(--panel-border); font-size: 13px; }
+.outlook-day-row:last-child { border-bottom: none; }
+
 .empty-state { text-align: center; color: var(--text-dim2); padding: 30px 10px; font-size: 13.5px; }
 
 a { color: var(--accent-blue); }

@@ -30,7 +30,7 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "phase-hi2c1-spot-metadata-v24-2026-09-03";
+const APP_BUILD = "fishing-intelligence-v1-product-finish-v26-2026-09-03";
 
 const STATE = {
   view: "copilot",
@@ -345,14 +345,152 @@ function tierColor(label) {
     cls === "chip-red" ? "var(--accent-red)" : "var(--text-dim2)";
 }
 
-// SPRINT 3 — Opportunity Hero. Ersetzt die bisherigen fuenf gleichrangigen Panels (Fangchance /
-// hartcodierter Top-Spot / Zeitfenster / Strategie / Bedingungen) durch: eine "Heute"-Hero-Karte
-// (Spot ECHT berechnet statt hartcodiert, Zeitfenster, Label GROSS + Index nur hinter Tap, Confidence
-// SEPARAT, dynamisches "Warum?"), einen "Noch besser"-Hinweis (nur wenn ein Folgetag die dokumentierte
-// Schwelle ueberschreitet, siehe FIMefoModel.pickNochBesser), einen kompakten 3-5-Tage-Streifen,
-// 1-2 Alternativ-Spots (echte Rangliste, siehe FIMefoModel.rankSpots), und einen eingeklappten
-// "Details & Rohdaten"-Bereich fuer Strategie-Text/Rohwerte/Spot-Rangliste. Siehe
-// docs/SPRINT3_UX_GATE_FINALIZATION.md fuer die vollstaendige Methodik/Begruendung.
+function spotDisplayName(spotId) {
+  return (FIMefoModel.SPOT_STATS[spotId] && FIMefoModel.SPOT_STATS[spotId].name) || spotId;
+}
+function whenConfEnToDe(c) { return { high: "hoch", medium: "mittel", low: "niedrig" }[c] || "niedrig"; }
+
+const _berlinDateFmt = (typeof Intl !== "undefined")
+  ? new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Berlin", year: "numeric", month: "2-digit", day: "2-digit" })
+  : null;
+function localDateKeyBerlin(d) { return _berlinDateFmt ? _berlinDateFmt.format(d) : d.toISOString().slice(0, 10); }
+
+// PRODUCT FINISH SPRINT (Auftrag Abschnitt 29, "keine doppelten Provider-Requests/mehrfachen
+// 120h-Forecasts/wiederholten WHERE-Laeufe"): EIN gecachter Aufruf von
+// FIWhereIntelligence.runWhereShadowAnalysis() liefert sowohl WANN (HI-2B, ueber
+// day.whenBestWindow) als auch WO (HI-2C, ueber day.bestWhere.top3) aus GENAU EINEM
+// HI-2A.1-Batch-Forecast — kein zweiter runWhenShadowAnalysis()-Aufruf noetig (der wuerde intern
+// erneut fetchen). Scope ist bewusst fest "shore" (Auftrag Abschnitt 10: HI-2C ist fachlich nur fuer
+// Ufer validiert; ein Boot-Modus-Toggle existiert im Co-Pilot aktuell nicht — siehe Details-Hinweis
+// weiter unten fuer die ehrliche Boot-Einordnung). Bei fehlendem Netz/Fehlern wird NIE geworfen,
+// sondern ein ehrliches supported:false zurueckgegeben (Auftrag Abschnitt 30, "nie einen Wert erfinden").
+let _whereWhenCache = null; // { waterId, fetchedAt, result }
+async function ensureWhereWhenAnalysis(waterId, maxAgeMs = 2 * 3600 * 1000) {
+  if (_whereWhenCache && _whereWhenCache.waterId === waterId && (Date.now() - _whereWhenCache.fetchedAt) < maxAgeMs) {
+    return _whereWhenCache.result;
+  }
+  if (!navigator.onLine) return _whereWhenCache?.result || { supported: false, status: "offline", reasons: ["offline"] };
+  let result;
+  try {
+    result = await FIWhereIntelligence.runWhereShadowAnalysis(waterId, "mefo", "shore", {});
+  } catch (e) {
+    result = { supported: false, status: "error", reasons: [e.message] };
+  }
+  _whereWhenCache = { waterId, fetchedAt: Date.now(), result };
+  return result;
+}
+
+// "Wann?" — Auftrag Abschnitt 5/6: bestes Zeitfenster als "ca."-Spanne (keine Scheinpraezision,
+// gleiches Prinzip wie die bisherige Daemmerungsfenster-Anzeige), Kontrast-Hinweis NUR wenn die
+// Unterschiede ueber den Tag tatsaechlich gering sind (dailyContrast === "low" aus HI-2B) — sonst
+// KEINE Behauptung einer starken Ueberlegenheit.
+function buildWhenPresentation(dayWW) {
+  if (!dayWW || !dayWW.whenBestWindow) {
+    return { text: "Bestes Zeitfenster derzeit nicht berechenbar (Prognosedaten unvollständig).", contrastNote: null };
+  }
+  const w = dayWW.whenBestWindow;
+  const start = new Date(w.startTimestamp);
+  const displayEnd = new Date(new Date(w.endTimestamp).getTime() + 3600000); // endTimestamp = Beginn der letzten Fensterstunde
+  return {
+    text: `Bestes Zeitfenster · ca. ${fmtApproxTime(start)}–${fmtApproxTime(displayEnd)}`,
+    contrastNote: dayWW.dailyContrast === "low" ? "Über den Tag nur geringe Unterschiede." : null,
+    confidenceLabel: confLabelDe(whenConfEnToDe(w.confidence)),
+  };
+}
+
+// "Wo?" — Auftrag Abschnitt 7/8: bei LOW_SPOT_CONTRAST NIE ein deterministisches Tie-Breaking als
+// "Top 3" verkaufen — stattdessen ehrlich "Keine klare Spot-Differenzierung" (+ optionale, explizit
+// UNGERANKTE Kandidatenliste). Nur bei ausreichendem Kontrast ein echtes Top-3 mit je maximal einem
+// kurzen Grund, Confidence separat je Spot.
+function whereSpotReasonDe(s) {
+  if (s.biologicalRules && s.biologicalRules.some((r) => r.ruleId === "WAVE_ONSHORE_ACTIVATION")) {
+    return "experimentell: auflandiger Wellenschlag";
+  }
+  return "experimentelle Spot-Einschätzung";
+}
+function buildWherePresentation(dayWW) {
+  if (!dayWW || !dayWW.bestWhere || !dayWW.bestWhere.top3 || !dayWW.bestWhere.top3.topSpots.length) {
+    return { mode: "no_data", text: "Spot-Einschätzung derzeit nicht verfügbar (Prognosedaten unvollständig).", list: [] };
+  }
+  const top3 = dayWW.bestWhere.top3;
+  if (top3.spotContrast === "low" || top3.spotContrast === "unknown") {
+    const candidates = top3.topSpots.map((s) => spotDisplayName(s.spotId)).sort((a, b) => a.localeCompare(b, "de"));
+    return { mode: "low_contrast", text: "Keine klare Spot-Differenzierung", list: candidates,
+      note: "Die Bedingungen unterscheiden sich zwischen den Spots aktuell kaum (experimentelle Einschätzung, HI-2C)." };
+  }
+  return { mode: "top3", list: top3.topSpots.map((s) => ({
+    name: spotDisplayName(s.spotId), reason: whereSpotReasonDe(s), confidence: confLabelDe(whenConfEnToDe(s.confidence)),
+  })) };
+}
+
+// "Warum?" — Auftrag Abschnitt 15: max. 2-3 kurze Gruende, KLAR getrennt Champion- vs.
+// Shadow-basiert, kein technischer Jargon (H1/H2/rawSuitability/...) in der normalen UI.
+function shadowWarumFromWhen(dayWW) {
+  if (!dayWW || !dayWW.whenBestWindow || dayWW.dailyContrast === "low") return null;
+  const reasons = dayWW.whenBestWindow.reasons || [];
+  if (reasons.includes("H1_ACTIVE")) {
+    return "🧪 Experimentell: wärmeres Wasser + niedriger Sonnenstand im besten Zeitfenster (unbewiesene Hypothese).";
+  }
+  return "🧪 Experimentell: rechnerisch günstigeres Zeitfenster laut Schatten-Analyse (unbewiesene Hypothese).";
+}
+
+// "Live-Bedingungen" (Auftrag Abschnitt 16) — kompakte Karte, Minimum Wassertemperatur/Wind/
+// Windrichtung/Welle/Pegelphase/Sonnenuntergang, Lufttemperatur optional. Welle kommt bewusst AUS
+// der bereits geladenen WHEN/WHERE-Fensteraggregation (aggregateWindowConditions) statt eines
+// weiteren Requests (Performance, Auftrag Abschnitt 29) — fehlt sie, wird das ehrlich benannt
+// (Auftrag Abschnitt 30 Beispieltext "Wellenprognose derzeit nicht verfügbar.").
+function buildLiveConditionsPanel(snap, waterPhase, todayWW) {
+  const waveM = todayWW?.bestWhere?.windowConditions?.waveHeightMMedian;
+  const rows = [
+    ["Wassertemperatur", snap?.water_temp_c?.value != null ? UI.fmtProvValue(snap.water_temp_c) : "nicht verfügbar"],
+    ["Wind", (snap?.wind_speed_bft?.value != null && snap?.wind_dir_deg?.value != null)
+      ? `${Math.round(snap.wind_dir_deg.value)}° / ${snap.wind_speed_bft.value} Bft` : "nicht verfügbar"],
+    ["Welle", (typeof waveM === "number") ? `${waveM.toFixed(1)} m (im besten Zeitfenster, experimentell)` : "Wellenprognose derzeit nicht verfügbar."],
+    ["Pegelphase", waterPhase.ok ? FIMefoModel.waterPhaseLabel(waterPhase.phase) : "derzeit unklar"],
+    ["Sonnenuntergang", snap?.sunset?.value ? fmtTime(new Date(snap.sunset.value)) : "nicht verfügbar"],
+  ];
+  if (snap?.air_temp_c?.value != null) rows.push(["Lufttemperatur", UI.fmtProvValue(snap.air_temp_c)]);
+  return UI.el("div", { class: "panel" }, [
+    UI.el("div", { class: "panel-label" }, "Live-Bedingungen"),
+    UI.el("div", { class: "quality-grid" }, rows.map(([k, v]) => UI.el("div", {}, [UI.el("strong", {}, k + ": "), v]))),
+  ]);
+}
+
+// 5-Tage-Ausblick-Detailzeile (Auftrag Abschnitt 17-19): Champion-Tagesbewertung (unveraendert
+// wiederverwendet), + bestes HI-2B-Zeitfenster, + HI-2C-Status (Top-Spot NUR bei ausreichendem
+// Kontrast, sonst ehrlich "Keine klare Spot-Differenzierung" statt eines willkuerlichen
+// Tie-Breaking-Spots) — NIE ein erfundener Spot, wenn WHERE fuer diesen Tag keine Daten liefert.
+function buildFiveDayItem(entry, whereWhenResult) {
+  const key = localDateKeyBerlin(entry.date);
+  const dWW = whereWhenResult && whereWhenResult.supported ? whereWhenResult.days.find((d) => d.localDate === key) : null;
+  const when = buildWhenPresentation(dWW);
+  const whenText = dWW && dWW.whenBestWindow
+    ? `ca. ${fmtApproxTime(new Date(dWW.whenBestWindow.startTimestamp))}–${fmtApproxTime(new Date(new Date(dWW.whenBestWindow.endTimestamp).getTime() + 3600000))} (Datenlage: ${when.confidenceLabel || "niedrig"})`
+    : "Zeitfenster nicht berechenbar";
+  let whereText;
+  const where = buildWherePresentation(dWW);
+  if (where.mode === "top3") whereText = where.list[0].name;
+  else if (where.mode === "low_contrast") whereText = "Keine klare Spot-Differenzierung";
+  else whereText = "Spot-Einschätzung nicht verfügbar";
+  return UI.el("div", { class: "outlook-day-row" }, [
+    UI.el("div", {}, [UI.el("strong", {}, `${weekdayShort(entry.date)} ${String(entry.date.getUTCDate()).padStart(2, "0")}.${String(entry.date.getUTCMonth() + 1).padStart(2, "0")}`), ` · `,
+      UI.el("span", { style: `color:${tierColor(entry.label)};font-weight:700;` }, entry.label.toUpperCase())]),
+    UI.el("div", { class: "subtext" }, `Zeitfenster: ${whenText} · Wo: ${whereText}`),
+  ]);
+}
+
+// PRODUCT FINISH SPRINT (Fishing Intelligence v1, 03.09.2026) — Co-Pilot-Hauptbildschirm, neu
+// orchestriert nach der geforderten Informationsarchitektur (Auftrag Abschnitt 3): LOHNT ES SICH? ->
+// WANN? -> WO? -> WAS? -> WARUM? -> LIVE-BEDINGUNGEN -> NAECHSTE 5 TAGE -> Details/Rohdaten. Reine
+// ORCHESTRATION bereits bestehender, unveraenderter Engines (Model Scope Lock, Auftrag Abschnitt 2):
+// Champion/SPOT_STATS (meerforelle-model.js), HI-2B WHEN (hourly-window-intelligence.js), HI-2C
+// WHERE (where-spot-intelligence.js), WHAT (what-intelligence.js, NEU diese Sprint — Scoring-Impact
+// "none"), Spot-Metadaten (spot-intelligence-data.js, hier NICHT gelesen — bleibt reine
+// Debug-Anzeige unter ?hidebug=1). Ersetzt die bisherige "Alternativen heute"-Historisch-Rangliste
+// im Hauptbildschirm (Auftrag-Design-Entscheidung, siehe PRODUCT_CHANGE_REPORT): zwei
+// unterschiedliche "welcher Spot?"-Aussagen (historisch vs. live-experimentell) nebeneinander im
+// Hauptbildschirm wuerden Abschnitt 27 ("keine verwirrende Sprache") verletzen — die historische
+// Rangliste bleibt vollstaendig erhalten, nur jetzt ausschliesslich in "Details & Rohdaten".
 async function buildMefoCopilotPanels() {
   const waterId = STATE.water;
   const dayPart = currentDayPartNow();
@@ -364,7 +502,13 @@ async function buildMefoCopilotPanels() {
 
   const rankedSpots = FIMefoModel.rankSpots();
   const topSpot = rankedSpots[0] || null;
-  const altSpots = rankedSpots.slice(1, 3);
+
+  // PRODUCT FINISH SPRINT: EIN gecachter WHEN+WHERE-Lauf fuer heute+die naechsten Tage (siehe
+  // ensureWhereWhenAnalysis oben) — deckt sowohl "Wann?"/"Wo?" heute als auch den 5-Tage-Ausblick ab.
+  const whereWhenResult = await ensureWhereWhenAnalysis(waterId);
+  const todayKey = localDateKeyBerlin(today);
+  const todayWW = whereWhenResult && whereWhenResult.supported
+    ? (whereWhenResult.days.find((d) => d.localDate === todayKey) || whereWhenResult.days[0] || null) : null;
 
   const forecast = await ensureForecastDaily(waterId, refLat, refLon, today, 5);
   const astro = new FIAstro.NOAAAstroProvider();
@@ -393,8 +537,12 @@ async function buildMefoCopilotPanels() {
   const nochBesser = FIMefoModel.pickNochBesser(todayEntry, dayEntries.slice(1));
   const waterLevelCandidate = FIMefoModel.waterLevelWarumCandidate(waterPhase); // SPRINT 3.1
   const expWindow = FIMefoModel.experimentalPostPeakWindow(waterPhase); // SPRINT 3.1 — Hypothese, getrennt von der Messung
-  const warumReasons = FIMefoModel.buildWarumReasons(
+  // Auftrag Abschnitt 15: max. 2-3 kurze Gruende im Hauptbildschirm (statt der bisherigen 4) — die
+  // vollstaendige, bis zu 4 Eintraege lange Liste bleibt zusaetzlich unveraendert in den Details.
+  const warumReasonsAll = FIMefoModel.buildWarumReasons(
     today.getUTCMonth() + 1, todayEntry.wassertemp, todayEntry.tFactor, topSpot, waterLevelCandidate);
+  const warumReasonsChampion = warumReasonsAll.slice(0, 2);
+  const warumShadow = shadowWarumFromWhen(todayWW);
 
   // SPRINT 3.1 (Punkt 7): "beste Aussicht der naechsten Tage" — bewusst GETRENNT von pickNochBesser
   // (das ist nur eine SCHWELLENWERT-gebundene, deutliche Verbesserung gegenueber heute). Hier: rein
@@ -404,24 +552,35 @@ async function buildMefoCopilotPanels() {
   const bestOutlook = futureDays.reduce((best, d) =>
     (d.index !== null && (best === null || d.index > best.index) ? d : best), null);
 
+  // ---- "WANN?" (HI-2B, Auftrag Abschnitt 5/6) ----
+  const whenInfo = buildWhenPresentation(todayWW);
+  // ---- "WO?" (HI-2C, Auftrag Abschnitt 7/8) ----
+  const whereInfo = buildWherePresentation(todayWW);
+  // ---- "WAS?" (WHAT, Auftrag Abschnitt 11-14) — Kontext AUSSCHLIESSLICH aus bereits geladenen
+  // Daten (kein weiterer Request, Auftrag Abschnitt 29): heutige Wassertemperatur, aktuelle
+  // Sonnenhoehe (rein astronomisch/offline berechnet, HI-1-Funktion wiederverwendet), Bewoelkung
+  // aus dem ohnehin geladenen Snapshot.
+  const nowSolar = (window.FIHourlyIntelligence && refLat !== undefined)
+    ? FIHourlyIntelligence.computeSolarFeatures(refLat, refLon, new Date()) : { solarElevationDeg: null };
+  const whatRec = window.FIWhatIntelligence ? FIWhatIntelligence.buildLureRecommendation({
+    waterTempC: todayEntry.wassertemp, solarElevationDeg: nowSolar.solarElevationDeg,
+    cloudCoverPct: snap?.cloud_cover_pct?.value ?? null,
+  }) : null;
+
   const wrap = UI.el("div", {});
 
-  // ---- HERO: HEUTE ----
+  // ---- 1) "LOHNT ES SICH?" + 2) "WANN?" (Hero-Karte, Auftrag Abschnitt 4/5/6/20) ----
   const indexReveal = UI.el("div", { class: "index-reveal hidden" },
-    todayEntry.index !== null
-      ? `Index ${todayEntry.index} — informativ, ersetzt nicht die Confidence. Index ≠ Fangwahrscheinlichkeit.`
-      : "Index nicht berechenbar (keine aktuelle Wassertemperatur).");
+    "Fangindex ist eine Modellzahl (Saison × Wassertemperatur), KEINE Fangwahrscheinlichkeit in Prozent.");
   const indexToggle = UI.el("button", { class: "index-toggle-btn", onclick: (ev) => {
     indexReveal.classList.toggle("hidden");
     ev.currentTarget.textContent = indexReveal.classList.contains("hidden") ? "Index anzeigen ⓘ" : "Index ausblenden";
   } }, "Index anzeigen ⓘ");
-
-  // SPRINT 3.1 (Punkt 5): "ca."-Zeitspanne statt exakter Minutenangabe — das Fenster ist
-  // astronomisch abgeleitet (Daemmerung), nicht aus dem Fangbuch als exaktes Beissfenster
-  // validiert. Exakte Werte bleiben in "Details & Rohdaten" (siehe dort).
-  const heroTimeLine = todayEntry.duskWindow
-    ? `Abendfenster · ca. ${fmtApproxTime(todayEntry.duskWindow.start)}–${fmtApproxTime(todayEntry.duskWindow.end)}`
-    : "Zeitfenster nicht berechenbar (Umweltdaten aktualisieren)";
+  // Auftrag Abschnitt 4: Fangindex-Zahl SEKUNDAER, aber sichtbar ("GUT / Fangindex 68"), NIE als
+  // "%"/"Fangwahrscheinlichkeit" formuliert (bewusst ohne "/100"-Schreibweise, siehe Sprint-3-Guardrail).
+  const heroIndexLine = UI.el("div", { class: "hero-index-line" },
+    todayEntry.index !== null ? `Fangindex ${todayEntry.index}` : "Fangindex nicht berechenbar (keine aktuelle Wassertemperatur)");
+  const heroTimeLine = [whenInfo.text, whenInfo.contrastNote].filter(Boolean).join(" · ");
 
   const confDots = (tier) => {
     const n = tier === "hoch" ? 3 : tier === "mittel" ? 2 : 1;
@@ -453,34 +612,71 @@ async function buildMefoCopilotPanels() {
       : null,
   ]);
 
+  // ---- 1) LOHNT ES SICH? + 2) WANN? (Hero-Karte) ----
   const heroCard = UI.el("div", { class: "hero-card" }, [
     UI.el("div", { class: "hero-tag" }, "Heute"),
-    UI.el("div", { class: "hero-headline" }, `${speciesEmoji("mefo")} Meerforelle`),
-    UI.el("div", { class: "hero-sub" }, heroTimeLine),
     UI.el("div", { class: "hero-label-row" }, [
       UI.el("div", { class: "hero-label", style: `color:${tierColor(todayEntry.label)};` }, todayEntry.label.toUpperCase()),
     ]),
-    // SPRINT 3.1 (Punkt 4): eigene Zeile statt Teil der Headline — "Staerkste historische
-    // Spot-Option" macht explizit, dass das eine HISTORISCHE Kennzahl ist, keine Aussage ueber die
-    // heutige Eignung des Spots (siehe rankSpots-Dokumentation).
-    UI.el("div", { class: "hero-spot-line" }, `📍 Stärkste historische Spot-Option: ${topSpot ? topSpot.name : "kein historisch validierter Spot"}`),
+    heroIndexLine,
     indexToggle, indexReveal,
+    UI.el("div", { class: "hero-sub" }, heroTimeLine),
     UI.el("div", { class: "confidence-row" }, [
       UI.el("span", {}, ["Confidence: ", UI.el("strong", {}, confLabelDe(todayEntry.confidenceTier))]),
       confDots(todayEntry.confidenceTier),
     ]),
     waterlevelRow,
-    UI.el("div", { class: "warum-label" }, "Warum?"),
-    UI.el("ul", { class: "warum-list" }, warumReasons.map((r) =>
-      UI.el("li", { class: r.ok ? "" : "warum-neg" }, `${r.ok ? "✓" : "•"} ${r.text}`))),
   ]);
   wrap.appendChild(heroCard);
 
-  // ---- NOCH BESSER (nur bei erfuellter, dokumentierter Regel — siehe pickNochBesser) ----
+  // ---- 3) WO? (HI-2C — Auftrag Abschnitt 7/8: bei geringem Spot-Kontrast KEIN vorgetaeuschtes
+  // Top-3-Ranking, sondern ehrlich "Keine klare Spot-Differenzierung") ----
+  wrap.appendChild(UI.el("div", { class: "section-label" }, "Wo?"));
+  if (whereInfo.mode === "no_data") {
+    wrap.appendChild(UI.el("div", { class: "panel" }, whereInfo.text));
+  } else if (whereInfo.mode === "low_contrast") {
+    wrap.appendChild(UI.el("div", { class: "panel" }, [
+      UI.el("div", { class: "wo-line" }, whereInfo.text),
+      UI.el("div", { class: "subtext" }, whereInfo.note),
+      whereInfo.list.length ? UI.el("div", { class: "subtext" }, "Geeignete Kandidaten (unsortiert): " + whereInfo.list.join(", ")) : null,
+    ]));
+  } else if (whereInfo.mode === "top3") {
+    wrap.appendChild(UI.el("div", { class: "alt-row" }, whereInfo.list.map((s) =>
+      UI.el("div", { class: "alt-card" }, [
+        UI.el("div", { class: "alt-name" }, s.name),
+        UI.el("div", { class: "alt-label", style: "font-size:11px;font-weight:600;" }, s.reason),
+        UI.el("div", { class: "alt-conf" }, `Confidence: ${s.confidence}`),
+      ]))));
+    wrap.appendChild(UI.el("div", { class: "subtext" }, "Experimentelle Spot-Einschätzung (HI-2C) — kein historisches Ranking."));
+  }
+
+  // ---- 4) WAS? (WHAT — Auftrag Abschnitt 11-14: max. 3 Angaben, IMMER evidenzbasiert formuliert) ----
+  wrap.appendChild(UI.el("div", { class: "section-label" }, "Was?"));
+  if (whatRec) {
+    wrap.appendChild(UI.el("div", { class: "panel" }, [
+      UI.el("div", { class: "was-line" }, whatRec.koedertyp.text),
+      UI.el("div", { class: "subtext" }, `${whatRec.farbeMuster.text} · ${whatRec.praesentation.text}`),
+      UI.el("div", { class: "subtext" }, whatRec.alternative.text),
+    ]));
+  } else {
+    wrap.appendChild(UI.el("div", { class: "panel" }, "Köder-Empfehlung derzeit nicht verfügbar."));
+  }
+
+  // ---- 5) WARUM? (max. 2-3 kurze Gruende, Champion klar getrennt von Shadow/experimentell) ----
+  wrap.appendChild(UI.el("div", { class: "warum-label" }, "Warum?"));
+  wrap.appendChild(UI.el("ul", { class: "warum-list" }, [
+    ...warumReasonsChampion.map((r) => UI.el("li", { class: r.ok ? "" : "warum-neg" }, `${r.ok ? "✓" : "•"} ${r.text}`)),
+    warumShadow ? UI.el("li", { class: "warum-shadow" }, warumShadow) : null,
+  ]));
+
+  // ---- LIVE-BEDINGUNGEN ----
+  wrap.appendChild(buildLiveConditionsPanel(snap, waterPhase, todayWW));
+
+  // ---- NOCH BESSER (nur bei erfuellter, dokumentierter Regel — siehe pickNochBesser, unveraendert) ----
   if (nochBesser) {
     wrap.appendChild(UI.el("div", { class: "noch-besser-banner" }, [
       UI.el("div", { class: "noch-besser-tag" }, "🔥 Noch besser"),
-      UI.el("div", { class: "noch-besser-body" }, `${weekdayLong(nochBesser.date)} · ${topSpot ? topSpot.name : "—"}`),
+      UI.el("div", { class: "noch-besser-body" }, weekdayLong(nochBesser.date)),
       UI.el("div", { class: "noch-besser-sub" }, [
         nochBesser.duskWindow ? `${fmtTime(nochBesser.duskWindow.start)} – ${fmtTime(nochBesser.duskWindow.end)} · ` : "",
         UI.el("strong", { style: `color:${tierColor(nochBesser.label)};` }, nochBesser.label.toUpperCase()),
@@ -488,10 +684,9 @@ async function buildMefoCopilotPanels() {
     ]));
   }
 
-  // ---- NAECHSTE TAGE ----
-  // SPRINT 3.1 (Punkt 7): Stern markiert den Tag mit der besten Aussicht unter Tag+1..Tag+4 — rein
-  // deskriptiv, unabhaengig von der "Noch besser"-Schwelle oben (siehe bestOutlook-Berechnung).
-  wrap.appendChild(UI.el("div", { class: "section-label" }, "Nächste Tage"));
+  // ---- NÄCHSTE 5 TAGE (Auftrag Abschnitt 17-19: Champion-Tagesbewertung unveraendert + reales
+  // HI-2B-Zeitfenster + ehrlicher HI-2C-Status pro Tag, nie ein erfundener Spot) ----
+  wrap.appendChild(UI.el("div", { class: "section-label" }, "Nächste 5 Tage"));
   wrap.appendChild(UI.el("div", { class: "day-strip" }, dayEntries.map((entry, i) => {
     const isBest = bestOutlook && entry.dayOffset === bestOutlook.dayOffset;
     return UI.el("div", { class: "day-chip" + (i === 0 ? " is-today" : "") + (isBest ? " is-best-outlook" : "") }, [
@@ -505,36 +700,12 @@ async function buildMefoCopilotPanels() {
     wrap.appendChild(UI.el("div", { class: "outlook-caption" },
       `⭐ ${weekdayLong(bestOutlook.date)} · ${bestOutlook.label.toUpperCase()} — beste Aussicht der nächsten Tage`));
   }
+  wrap.appendChild(UI.el("div", { class: "panel" }, dayEntries.map((entry) => buildFiveDayItem(entry, whereWhenResult))));
 
-  // ---- ALTERNATIVEN HEUTE (nur bei echtem Entscheidungswert, siehe Punkt 8) ----
-  // Das Fangindex-Modell ist NICHT spot-abhaengig (nur Saison × Wassertemperatur) — alle Spots
-  // teilen sich daher IMMER dasselbe Tages-Label. "Alternativen" mit demselben Label wie der Hero
-  // erneut anzuzeigen, taeuscht eine Differenzierung vor, die es fachlich nicht gibt. Ist der
-  // heutige Tag insgesamt schwach, ist "noch ein schwacher Spot" kein Mehrwert — stattdessen wird
-  // die naechste tatsaechlich bessere Gelegenheit hervorgehoben (kein Alternativen-Panel nur, weil
-  // die Daten technisch verfuegbar sind).
-  // "Unbekannt" (Index nicht berechenbar, z.B. keine Wassertemperatur) gehoert ebenfalls zur
-  // Gating-Bedingung: ohne heutige Bewertung wirken "Alternativen" wie eine vorgetaeuschte
-  // Differenzierung — die Hero-Karte kommuniziert die fehlende Datenlage bereits ehrlich.
-  const showAlternatives = todayEntry.label !== "Schwach" && todayEntry.label !== "Unbekannt" && altSpots.length > 0;
-  if (showAlternatives) {
-    wrap.appendChild(UI.el("div", { class: "section-label" }, "Alternativen heute"));
-    wrap.appendChild(UI.el("div", { class: "alt-row" }, altSpots.map((sp) =>
-      UI.el("div", { class: "alt-card" }, [
-        UI.el("div", { class: "alt-name" }, sp.name),
-        UI.el("div", { class: "alt-label" }, `${Math.round(sp.shrunkRate * 100)}% historisch`),
-        UI.el("div", { class: "alt-conf" }, `Confidence: ${confLabelDe(sp.confidenceTier)}`),
-      ])
-    )));
-  } else if (todayEntry.label === "Schwach") {
-    const better = bestOutlook && FIMefoModel.labelRank(bestOutlook.label) > FIMefoModel.labelRank(todayEntry.label) ? bestOutlook : null;
-    wrap.appendChild(UI.el("div", { class: "next-better-block" },
-      better
-        ? ["Heute insgesamt schwach. ", UI.el("strong", {}, `⭐ Nächste bessere Aussicht: ${weekdayLong(better.date)} (${better.label.toUpperCase()})`)]
-        : "Heute insgesamt schwach — auch die nächsten Tage zeigen aktuell keine klar bessere Gelegenheit."));
-  }
-
-  // ---- DETAILS & ROHDATEN (eingeklappt: bisheriges Strategie-/Bedingungen-Panel + Spot-Rangliste) ----
+  // ---- DETAILS & ROHDATEN (eingeklappt: Strategie-/Bedingungen-Panel + Spot-Rangliste, jetzt
+  // zusaetzlich die historische Spot-Option (Auftrag Abschnitt 9: Spot-Metadaten/-Historie bleiben
+  // rein beschreibend, NIE als versteckte neue Rangliste im Hauptbildschirm) + ehrlicher
+  // Boot-Hinweis (Auftrag Abschnitt 10) ----
   const windBft = snap?.wind_speed_bft?.value ?? null;
   const windDir = snap?.wind_dir_deg?.value ?? null;
   const detailsBody = UI.el("div", { class: "details-body hidden" }, [
@@ -550,8 +721,6 @@ async function buildMefoCopilotPanels() {
         UI.el("div", {}, `Pegel (absolut): ${UI.fmtProvValue(snap?.water_level_cm, 0)}`),
         UI.el("div", {}, `Wassertemp.: ${UI.fmtProvValue(snap?.water_temp_c)}`),
       ]),
-      // SPRINT 3.1 (Punkt 2/9): Wasserstandstrend als eigene, tiefere Detailzeile — der absolute
-      // Pegel bleibt (oben), die Phase/Rate/Datenalter kommen zusaetzlich dazu, nicht anstelle.
       UI.el("div", { class: "subtext" },
         waterPhase.ok
           ? `Wasserstandstrend: ${FIMefoModel.waterPhaseLabel(waterPhase.phase)}` +
@@ -560,18 +729,23 @@ async function buildMefoCopilotPanels() {
           : `Wasserstandstrend: unklar${waterPhase.reason ? ` (${waterPhase.reason})` : ""}`),
       todayEntry.duskWindow
         ? UI.el("div", { class: "subtext" },
-          `Zeitfenster (exakt, astronomisch): ${fmtTime(todayEntry.duskWindow.start)}–${fmtTime(todayEntry.duskWindow.end)} (60min vor Sonnenuntergang bis 60min nach Ende bürgerliche Dämmerung)`)
+          `Dämmerungsfenster (exakt, astronomisch): ${fmtTime(todayEntry.duskWindow.start)}–${fmtTime(todayEntry.duskWindow.end)} (60min vor Sonnenuntergang bis 60min nach Ende bürgerliche Dämmerung)`)
         : null,
       snap ? UI.el("div", { class: "subtext", html: `Status: ${UI.statusChip(snap.status)} · Datenqualität: ${snap.data_quality}` }) : null,
     ]),
     UI.el("div", { class: "panel" }, [
-      // SPRINT 3.1 (Punkt 9): einfachere Sprache — Methodik (Shrinkage etc.) bleibt in
-      // docs/audit_fangindex_v1.md dokumentiert, hier nur noch die fuer den Angler relevante Aussage.
       UI.el("div", { class: "panel-label" }, "Historische Spot-Stärke"),
       UI.el("div", { class: "subtext" },
-        "Rangfolge aus deinem Fangbuch. Aktuelle Wetterbedingungen verändern diese Rangfolge derzeit noch nicht."),
-      UI.el("ul", { class: "warum-list", style: "padding-left:16px;" }, rankedSpots.slice(0, 6).map((sp) =>
+        `Rangfolge aus deinem Fangbuch. Aktuelle Wetterbedingungen verändern diese Rangfolge derzeit noch nicht. ` +
+        `Stärkste historische Spot-Option: ${topSpot ? topSpot.name : "kein historisch validierter Spot"}.`),
+      UI.el("ul", { class: "historic-spot-list", style: "padding-left:16px;font-size:13.5px;line-height:1.55;" }, rankedSpots.slice(0, 6).map((sp) =>
         UI.el("li", {}, `${sp.name}: ${Math.round(sp.shrunkRate * 100)}% (n=${sp.n}, Confidence: ${confLabelDe(sp.confidenceTier)})`))),
+    ]),
+    UI.el("div", { class: "panel" }, [
+      UI.el("div", { class: "panel-label" }, "Hinweis Ufer/Boot"),
+      UI.el("div", { class: "subtext" },
+        "Die Abschnitte „Wo?“ oben gehen von Ufer-Angeln aus (bislang einzige fachlich validierte HI-2C-Kombination). " +
+        "Für Boot ist die dynamische Spot-Empfehlung noch nicht validiert."),
     ]),
     UI.el("button", { class: "btn btn-ghost", onclick: async (ev) => {
       ev.target.textContent = "Lädt…"; ev.target.disabled = true;
@@ -1844,9 +2018,14 @@ async function viewInsights() {
     }
   }
 
-  root.appendChild(UI.el("div", { class: "panel-label", style: "margin-top:10px;" }, "🔎 Frag meine Angeldaten (vorbereitet, Sprint 3)"));
-  root.appendChild(UI.el("input", { type: "text", placeholder: "z.B. „Was wissen wir über Zander in der Trave bei steigendem Pegel?“", disabled: "disabled" }));
-  root.appendChild(UI.el("div", { class: "subtext" }, "Noch nicht funktional — Datenmodell/Provenance ist dafür bereits vorbereitet (getrennte Quellen, Confidence, Umweltdaten), die Auswertungslogik folgt erst nach ausreichender Datenbasis (Abschnitt 37/38)."));
+  // PRODUCT FINISH SPRINT (Auftrag Abschnitt 22): "Frag meine Angeldaten" ist ein unfertiges,
+  // deaktiviertes Eingabefeld — bleibt NICHT laenger prominent in der normalen UI sichtbar (das
+  // waere ein sichtbar kaputtes Feature), sondern nur noch unter ?hidebug=1 als "Coming Later".
+  if (HI_DEBUG) {
+    root.appendChild(UI.el("div", { class: "panel-label", style: "margin-top:10px;" }, "🔎 Frag meine Angeldaten (Debug/Coming Later — vorbereitet, Sprint 3)"));
+    root.appendChild(UI.el("input", { type: "text", placeholder: "z.B. „Was wissen wir über Zander in der Trave bei steigendem Pegel?“", disabled: "disabled" }));
+    root.appendChild(UI.el("div", { class: "subtext" }, "Noch nicht funktional — Datenmodell/Provenance ist dafür bereits vorbereitet (getrennte Quellen, Confidence, Umweltdaten), die Auswertungslogik folgt erst nach ausreichender Datenbasis (Abschnitt 37/38)."));
+  }
 
   // ---------------------------------------------------------------------------
   // PHASE HI-1 (Sea Trout Hourly Intelligence — Data Foundation & Shadow Infrastructure,

@@ -5,7 +5,21 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v25"; // v25: Phase HI-2C.1 E2E-Reparatur-Build (03.09.2026) — REIN
+const CACHE_NAME = "fishintel-shell-v26"; // v26: Fishing Intelligence v1 — Product Finish Sprint
+// (03.09.2026). NEUE Datei js/what-intelligence.js (window.FIWhatIntelligence, WHAT_SCORING_IMPACT
+// = "none"): erstmals produktsichtbare Koeder-/Fliegen-Intelligenz, AUSSCHLIESSLICH aus der bereits
+// dokumentierten Sea Trout Lure & Fly Intelligence KB (claude/sea_trout_lure_fly_intelligence_kb_v1.md),
+// ohne jeden Einfluss auf Champion/Fangindex/SPOT_STATS/HI-2B/HI-2C (reine, deterministische
+// Orchestrations-/Praesentationsschicht, kein neues Scoring). js/app.js: viewCoPilot()/
+// buildMefoCopilotPanels() komplett neu orchestriert nach der geforderten Informationsarchitektur
+// (Lohnt es sich?/Wann?/Wo?/Was?/Warum?/Live-Bedingungen/Naechste 5 Tage), "Frag meine Angeldaten"
+// nur noch unter ?hidebug=1 sichtbar (vorher unfertig prominent in Insights). Champion-Formel/
+// Saisonfaktor/Temperaturfaktor/Tier-Schwellen/SPOT_STATS/Challenger/HI-1/HI-2A.1/HI-2B-Formel-
+// Gewichte/HI-2C-Scoring/Spot-Metadaten (spot-intelligence-data.js) UNVERAENDERT (Model Scope Lock,
+// Auftrag Abschnitt 2 — siehe Model Scope Audit im Product Change Report). DB_VERSION unveraendert
+// (bleibt 8) — keine neue Persistenz noetig, WHAT ist zustandslos. Reiner Cache-Version-Bump plus
+// ein neues SHELL_FILES-Element (js/what-intelligence.js), sonst identisches Service-Worker-
+// Verhalten (Cache-first, wie unten dokumentiert). v25: Phase HI-2C.1 E2E-Reparatur-Build (03.09.2026) — REIN
 // vorsorglicher Cache-Version-Bump, KEINE Code-/Logikaenderung an Champion/Fangindex/SPOT_STATS/
 // HI-1/HI-2A/HI-2A.1/HI-2B/HI-2C-Scoring/Cloud/DB. Grund: nach dem v24-Build wurde live beobachtet,
 // dass js/spot-intelligence-data.js zunaechst 404'te; nach Behebung des 404 blieb
@@ -58,6 +72,7 @@ const SHELL_FILES = [
   "./js/hourly-window-intelligence.js",
   "./js/where-spot-intelligence.js",
   "./js/spot-intelligence-data.js",
+  "./js/what-intelligence.js",
   "./js/speech.js",
   "./js/seed-data.js",
   "./js/ui.js",
