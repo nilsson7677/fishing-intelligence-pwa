@@ -5,7 +5,23 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v24"; // v24: Phase HI-2C.1 "Spot Intelligence Metadata Layer" (03.09.2026) — NEUE Datei
+const CACHE_NAME = "fishintel-shell-v25"; // v25: Phase HI-2C.1 E2E-Reparatur-Build (03.09.2026) — REIN
+// vorsorglicher Cache-Version-Bump, KEINE Code-/Logikaenderung an Champion/Fangindex/SPOT_STATS/
+// HI-1/HI-2A/HI-2A.1/HI-2B/HI-2C-Scoring/Cloud/DB. Grund: nach dem v24-Build wurde live beobachtet,
+// dass js/spot-intelligence-data.js zunaechst 404'te; nach Behebung des 404 blieb
+// window.FISpotIntelligenceData im Browser dennoch zeitweise "undefined" und das neue Debug-Panel
+// erschien nicht — ein Symptombild, das exakt zum bereits einmal aufgetretenen Muster "gemischte
+// GitHub-Pages-/Service-Worker-Cache-Version" passt (alte gecachte Antwort unter einer URL, die nie
+// neu abgerufen wird, solange derselbe CACHE_NAME aktiv bleibt — der Fetch-Handler ist bewusst
+// cache-first, siehe unten). Diese Session konnte die Live-Deployment-Umgebung nicht direkt
+// inspizieren; ein Node/Playwright-Audit des aktuellen Codestands fand KEINEN Syntaxfehler und KEINE
+// Logikluecke in js/spot-intelligence-data.js/js/app.js (echter Browser-E2E-Test, 18/18 bestanden,
+// siehe HI2C1_E2E_REPAIR_REPORT.md) — der wahrscheinlichste Erklaerungsansatz bleibt eine veraltete
+// Service-Worker-Cache-Instanz. Ein neuer CACHE_NAME erzwingt bei jedem Client einen vollstaendigen
+// Neuabruf ALLER SHELL_FILES vom Netz (install-Event, cache.addAll) und loescht beim naechsten
+// activate-Event JEDE Cache-Instanz mit abweichendem Namen (bestehende activate-Logik, unveraendert)
+// — IndexedDB/Nutzerdaten sind davon nicht betroffen (siehe Lehre aus einem frueheren, aehnlichen
+// Cache-Vorfall: nur Cache loeschen + SW neu registrieren, NIEMALS IndexedDB anfassen). v24: Phase HI-2C.1 "Spot Intelligence Metadata Layer" (03.09.2026) — NEUE Datei
 // js/spot-intelligence-data.js (window.FISpotIntelligenceData): REINE, statische Datenschicht mit
 // granularen physikalischen/geografischen Metadaten (Geometrie, Bathymetrie, Substrat, Habitat,
 // kuenstliche Struktur, Hydrodynamik-Hypothesen, Ufer-/Boot-Zugriffsprofil, Provenance, Evidenzgrad,
