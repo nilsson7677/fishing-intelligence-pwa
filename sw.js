@@ -5,7 +5,56 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v27"; // v27: Fishing Intelligence v1 — Test Data Cleanup Sprint
+const CACHE_NAME = "fishintel-shell-v28"; // v28: Fishing Intelligence v1 — Data Integrity + 29-Spot
+// Product Coverage + Personal Fishing Window (04.09.2026). DREI Teile, alle Model-Scope-Lock-konform
+// (Champion/Fangindex/HI-2B/HI-2C/SPOT_STATS/WHAT/historische Daten unveraendert):
+// TEIL A (Data Integrity): fishing_session existiert jetzt SOFORT bei Trip-Start (status
+// "in_progress"), nicht erst bei "Trip beenden" (vorher die strukturelle Ursache dafuer, dass ein
+// abgebrochener/verworfener Trip spurenlos verschwinden konnte) — durchlaeuft
+// in_progress -> completed (Trip-Ende, UPDATE derselben Session, KEINE zweite Session) bzw.
+// -> abandoned (explizites "Verwerfen" im Recovery-Screen, KEIN Loeschen mehr von trip_track/
+// fishing_session). Legacy-v27-active_trip_state-Eintraege OHNE passende Session bekommen beim
+// expliziten Fortsetzen/Verwerfen idempotent (kein Duplikat bei Mehrfachaufruf) eine nachtraeglich
+// erstellte Session aus den bereits vorhandenen echten Feldern — nichts wird erfunden/rekonstruiert.
+// Quick-Log "Fang erfassen": Nullrunde-Checkbox und Anzahl-Feld waren bisher unabhaengig voneinander
+// lesbar (Checkbox setzte beim Ankreuzen den Zaehler auf 0, ein erneutes Abwaehlen stellte ihn nie
+// wieder her, gespeichert wurde ausschliesslich der Zaehlerwert) — plausibler Root-Cause fuer
+// "Eigene Faenge: 0" trotz eines echten geloggten Fangs. Jetzt strukturell exklusiv + Validierung vor
+// dem Speichern + vollstaendig abgewartetes Schreiben mit explizitem Fehler-Feedback (kein falsches
+// "gespeichert" bei fehlgeschlagenem Write). Insights-Zaehler "Eigene Trips" zaehlt jetzt nur noch
+// abgeschlossene (completed) Trips, laufende separat ausgewiesen, verworfene bleiben in der DB
+// erhalten, aber ausserhalb der Hauptzaehler. Neues rein lesendes Debug-Panel "Data Integrity" unter
+// ?hidebug=1 (Insights) — fishing_session/catch_event/orphan-Eintraege/active_trip_state/
+// trip_track-Beziehung, keine Loesch-/Reparaturfunktion. Die beiden bereits vor v28 fehlenden
+// historischen Trips werden NICHT rekonstruiert (kein erfundener Datensatz).
+// TEIL B (29-Spot Product Coverage): alle 29 autoritativen HI-2C.1-Master-Spots (u.a. Scharbeutz,
+// Haffkrug, Niendorf Badesteg/Mole/Blindenstrand) sind jetzt in der produktiven Spot-Auswahl (Trip-
+// Start, Fang erfassen, Gewässer-Ansicht) waehlbar — additiv ueber die bereits bestehende, bei jedem
+// App-Start laufende reconcileReferenceData()-Idempotenz-Logik (seed-data.js), funktioniert daher
+// auch auf einer bestehenden Installation, OHNE Nutzerdaten anzufassen. ID-Strategie (Auftrag
+// Abschnitt 13): alle 29 Spots bekommen den garantiert kollisionsfreien Praefix "m29-" (3 der 29
+// Original-IDs — bliesdorf/groemitz/dahmeshoeved — waeren sonst mit bereits bestehenden,
+// snake_case-identischen SPOT_STATS-IDs kollidiert und haetten diese beim naechsten Reconcile-Lauf
+// STILL UEBERSCHRIEBEN). Alle 14 bisherigen SPOT_STATS-spot_ids + "herrenwyk" bleiben zu 100%
+// unveraendert. Neue Spots erben KEINEN historischen SPOT_STATS-Wert (fangbuch_n bleibt null,
+// Gewässer-Ansicht zeigt ehrlich "Keine eigenen historischen Daten" statt "wenig Daten"). HI-2C
+// selbst (SPOT_GEO_METADATA, hourly-intelligence.js, 13 Spots) UNVERAENDERT — die 29-Spot-Liste
+// speist NICHT automatisch die HI-2C-Rankingbasis (das ist strukturell unmoeglich, da HI-2C
+// ausschliesslich SPOT_GEO_METADATA liest, nie den IndexedDB-"spot"-Store).
+// TEIL C (Personal Fishing Window): NEUE Datei js/personal-fishing-window.js
+// (window.FIPersonalWindow) — reine Produkt-/Nutzer-Constraint-Schicht, liest AUSSCHLIESSLICH die
+// bereits oeffentlichen HI-2B-Test-Hook-Funktionen (buildWindowCandidates/deduplicateOverlapping aus
+// window.FIHourlyWindowIntelligence), hourly-window-intelligence.js selbst UNVERAENDERT. Der
+// Co-Pilot ("Wann?", Hero-Karte + 5-Tage-Ausblick) zeigt jetzt nur noch das beste HI-2B-Fenster
+// INNERHALB von Sonnenaufgang-1h bis Sonnenuntergang+1h (FISHING_WINDOW_PREFERENCE) statt eines
+// moeglichen Nachtfensters — HI-2B bewertet weiterhin intern alle 24h, KEINE Renormalisierung der
+// relativeOpportunity-Skala auf den Korridor. ?hidebug=1 zeigt zusaetzlich RAW HI-2B-Fenster/
+// erlaubten Korridor/produktiv empfohlenes Fenster nebeneinander (Transparenz), fuer heute UND jeden
+// Tag im 5-Tage-Ausblick einzeln (eigener Sonnenauf-/-untergang pro Tag).
+// KEINE DB_VERSION-Aenderung (bleibt 8 — status/completed_at/abandoned_at/legacy_recovered auf
+// fishing_session und access_modes/spot_layer/source_spot_intelligence_id auf spot sind rein additive
+// Felder auf bereits bestehenden Stores, kein neuer Store/Index noetig). EIN neuer SHELL_FILES-Eintrag
+// (js/personal-fishing-window.js). v27: Fishing Intelligence v1 — Test Data Cleanup Sprint
 // (03.09.2026). NEUE, rein additive Funktion "Testdaten bereinigen" unter Insights (Datenverwaltung):
 // der Nutzer kann einzelne, EXPLIZIT ausgewaehlte eigene Touren (fishing_session) samt tatsaechlich
 // verknuepfter Datensaetze (catch_event/trip_track/environmental_snapshot/shadow_evaluation, siehe
@@ -91,6 +140,7 @@ const SHELL_FILES = [
   "./js/where-spot-intelligence.js",
   "./js/spot-intelligence-data.js",
   "./js/what-intelligence.js",
+  "./js/personal-fishing-window.js",
   "./js/speech.js",
   "./js/seed-data.js",
   "./js/ui.js",

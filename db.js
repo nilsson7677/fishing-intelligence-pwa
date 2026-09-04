@@ -176,6 +176,26 @@ async function del(storeName, key) {
   });
 }
 
+// TEST DATA CLEANUP Sprint (03.09.2026): REIN ADDITIVE Hilfsfunktion, KEIN neuer Store/Index/Feld,
+// KEINE DB_VERSION-Aenderung (DB_VERSION bleibt 8, Auftrag Abschnitt 11 "DB_VERSION moeglichst
+// unveraendert"). Loescht mehrere Datensaetze — potenziell aus mehreren Stores — in GENAU EINER
+// IndexedDB-Transaktion. Nativ atomar: schlaegt irgendeine der Loeschungen fehl, wirft der Browser
+// die Transaktion automatisch komplett zurueck (IndexedDB-Spezifikation) — es entsteht nie ein nur
+// teilweise geloeschter, inkonsistenter Zustand (Auftrag Abschnitt 11). Wird ausschliesslich von der
+// Testdaten-Bereinigung (app.js, deleteFishingSessionCascade) genutzt.
+async function deleteMany(deletions) {
+  if (!deletions || !deletions.length) return true;
+  const db = await openDb();
+  const storeNames = [...new Set(deletions.map((d) => d.store))];
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeNames, "readwrite");
+    for (const { store, key } of deletions) tx.objectStore(store).delete(key);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("Loesch-Transaktion abgebrochen — keine der Loeschungen wurde uebernommen."));
+  });
+}
+
 async function clearAll() {
   const db = await openDb();
   return new Promise((resolve, reject) => {
@@ -196,4 +216,4 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-window.FIDB = { openDb, put, get, getAll, del, clearAll, newId, nowIso, STORES, DB_VERSION };
+window.FIDB = { openDb, put, get, getAll, del, deleteMany, clearAll, newId, nowIso, STORES, DB_VERSION };
