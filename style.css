@@ -144,6 +144,13 @@ body.is-offline .view-root { padding-top: calc(40px + var(--safe-top)); }
 
 .uncalibrated-box { background: var(--panel); border: 1px dashed #3a5a72; padding: 16px; border-radius: 14px; font-size: 13.5px; color: var(--text-dim); text-align: center; }
 
+/* ---------- v29.1: permanentes, dezentes Versions-Label (Co-Pilot Startscreen) ----------
+   Auftrag "VERSION LABEL MICRO-HOTFIX": mobile-first, visuell zurueckhaltend, darf der primaeren
+   "Lohnt es sich?"-Hero-Hierarchie (.hero-card weiter unten) nicht die Aufmerksamkeit nehmen — daher
+   kleine Schrift, gedaempfte Farbe (--text-dim2, wie .ctx-sep/.panel-label), reduzierte Deckkraft,
+   knapper Abstand statt eigenem Kartenrahmen. */
+.app-version-tag { font-size: 10.5px; color: var(--text-dim2); opacity: .7; text-align: center; letter-spacing: .02em; margin: 0 0 10px; }
+
 /* ---------- Sprint 3: Opportunity Hero (Co-Pilot Startscreen) ---------- */
 .ctx-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
 .ctx-pill { flex: 1; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 999px; padding: 6px 12px; display: flex; gap: 6px; align-items: center; }

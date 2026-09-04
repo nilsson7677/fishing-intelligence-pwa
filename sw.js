@@ -5,7 +5,7 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v29-2"; // v29.1: VERSION LABEL MICRO-HOTFIX (04.09.2026).
+const CACHE_NAME = "fishintel-shell-v29-1"; // v29.1: VERSION LABEL MICRO-HOTFIX (04.09.2026).
 // Reines UI-Hotfix, KEIN Scoring-/Modell-/DB-/Cloud-Code veraendert: permanent sichtbares, dezentes
 // Versions-Label ("Fishing Intelligence · v29.1") oben auf dem Co-Pilot-Hauptbildschirm, aus
 // APP_BUILD abgeleitet (js/app.js: deriveVersionLabel/APP_VERSION_LABEL) — einzige Quelle der
