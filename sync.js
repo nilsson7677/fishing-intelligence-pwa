@@ -17,7 +17,7 @@
 // gecacht, weil sie ohnehin nur mit Netz sinnvoll ist (siehe sw.js-Kommentar).
 
 const SUPABASE_URL = "https://vqqqemrodbjsypvxxhry.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_xeRdY-Cd2gtDn9mluNHkgA_F_GXNAd"; // publishable/anon Key -- durch RLS abgesichert, bewusst oeffentlich im Client, siehe Begleitdokument Abschnitt 5. NIEMALS den service_role Key hier eintragen.
+const SUPABASE_ANON_KEY = "sb_publishable_xeRdY-Cd2gtDn9mluNHkgA_F_GXNAdH"; // publishable/anon Key -- durch RLS abgesichert, bewusst oeffentlich im Client, siehe Begleitdokument Abschnitt 5. NIEMALS den service_role Key hier eintragen.
 const SUPABASE_SDK_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js";
 
 // Store->Tabellenname ist 1:1 identisch (siehe supabase_setup.sql). Nur diese 8 Stores werden
@@ -141,10 +141,47 @@ async function enqueue(store, recordId) {
       store, record_id: recordId,
       enqueued_at: FIDB.nowIso(),
       attempts: 0, last_error: null, last_attempt_at: null,
+      // op fehlt bewusst (=> impliziter Default "upsert", siehe flushQueue()). Ein enqueue() nach
+      // einem vorherigen Tombstone-Eintrag (siehe enqueueTombstone() unten) fuer denselben queue_key
+      // ueberschreibt diesen Eintrag hier bewusst wieder zu einem normalen Upload zurueck — genau
+      // richtig, falls ein Datensatz mit derselben ID erneut angelegt/veraendert wird.
     });
   } catch (e) {
     // Darf NIEMALS die aufrufende Erfassungs-Aktion beeintraechtigen (LOCAL FIRST).
     console.warn("Cloud-Sync-Queue: Eintrag konnte nicht angelegt werden (lokal folgenlos):", e);
+  }
+}
+
+// v29 (Auftrag Abschnitt 10 — CLOUD DELETE POLICY / Tombstones): wird von der lokalen
+// Testdaten-Bereinigung (app.js deleteFishingSessionCascade) VOR dem eigentlichen lokalen Loeschen
+// aufgerufen, fuer jeden betroffenen CLOUD_STORES-Datensatz. Ersetzt einen evtl. vorhandenen
+// normalen Queue-Eintrag fuer dieselbe ID durch einen Tombstone-Eintrag (op:"delete") — beim
+// naechsten flushQueue()-Lauf wird dadurch NICHT der (dann bereits lokal geloeschte) Inhalt
+// hochgeladen, sondern stattdessen ein minimaler deleted_at-Marker auf die Cloud-Zeile geschrieben
+// (siehe flushQueue() unten). Physisches Loeschen der Cloud-Zeile passiert bewusst NICHT (Auftrag
+// Abschnitt 10: "Do NOT implement destructive cloud deletion casually" + die Cloud-Tabellen haben
+// ohnehin keine DELETE-RLS-Policy, siehe supabase_setup.sql/supabase_migration_v29.sql).
+async function enqueueTombstone(store, recordId) {
+  if (!CLOUD_STORES.includes(store) || !recordId) return;
+  try {
+    await FIDB.put("sync_queue", {
+      queue_key: `${store}:${recordId}`,
+      store, record_id: recordId,
+      op: "delete",
+      enqueued_at: FIDB.nowIso(),
+      attempts: 0, last_error: null, last_attempt_at: null,
+    });
+  } catch (e) {
+    console.warn("Cloud-Sync-Queue: Tombstone-Eintrag konnte nicht angelegt werden (lokal folgenlos):", e);
+  }
+}
+
+// Komfortfunktion fuer eine ganze Loesch-Kaskade (mehrere Stores/IDs auf einmal, siehe
+// deleteFishingSessionCascade() in app.js). Ignoriert Eintraege, deren Store nicht cloud-gesichert
+// ist (z.B. enrichment_queue) — analog zum bestehenden Filter auf FISync.CLOUD_STORES dort.
+async function enqueueTombstones(deletions) {
+  for (const d of deletions || []) {
+    if (CLOUD_STORES.includes(d.store)) await enqueueTombstone(d.store, d.key);
   }
 }
 
@@ -192,10 +229,20 @@ async function flushQueue() {
     const pending = await FIDB.getAll("sync_queue");
     let done = 0, stillPending = 0;
     for (const q of pending) {
-      const record = await FIDB.get(q.store, q.record_id);
-      if (!record) { await FIDB.del("sync_queue", q.queue_key); continue; } // lokal geloescht -> verwaister Queue-Eintrag, aufraeumen
       try {
-        const payload = buildCloudPayload(q.store, record, session.user.id);
+        let payload;
+        if (q.op === "delete") {
+          // v29 Tombstone-Eintrag (siehe enqueueTombstone() oben): der lokale Datensatz ist bereits
+          // geloescht, es gibt nichts mehr zu lesen — stattdessen ein minimaler deleted_at-Marker.
+          // upsert() statt update(), weil der Datensatz u.U. NIE zuvor erfolgreich synchronisiert
+          // wurde (z.B. sofort nach dem Anlegen wieder geloescht) — dann legt dies eine reine
+          // Tombstone-Zeile neu an, was durch die bestehende INSERT-RLS-Policy gedeckt ist.
+          payload = { [_primaryKeyOf(q.store)]: q.record_id, user_id: session.user.id, device_id: _deviceId(), deleted_at: FIDB.nowIso(), synced_at: FIDB.nowIso() };
+        } else {
+          const record = await FIDB.get(q.store, q.record_id);
+          if (!record) { await FIDB.del("sync_queue", q.queue_key); continue; } // lokal geloescht ohne Tombstone (aeltere Logik/Edge-Case) -> verwaister Queue-Eintrag, aufraeumen
+          payload = buildCloudPayload(q.store, record, session.user.id);
+        }
         const { error } = await client.from(q.store).upsert(payload, { onConflict: _primaryKeyOf(q.store) });
         if (error) throw error;
         await FIDB.del("sync_queue", q.queue_key);
@@ -208,6 +255,7 @@ async function flushQueue() {
         try { await FIDB.put("sync_queue", q); } catch (e2) { /* lokal folgenlos */ }
       }
     }
+    try { localStorage.setItem("fi_last_sync_attempt_at", FIDB.nowIso()); } catch (e) {}
     if (done > 0) { try { localStorage.setItem("fi_last_cloud_sync_at", FIDB.nowIso()); } catch (e) {} }
     return { attempted: pending.length, done, stillPending };
   } finally {
@@ -215,17 +263,245 @@ async function flushQueue() {
   }
 }
 
+function _lsGet(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function _lsSet(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
+function _lsGetJson(key) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
+function _lsSetJson(key, obj) { try { localStorage.setItem(key, JSON.stringify(obj)); } catch (e) {} }
+
 // ---------------------------------------------------------------------------
-// STATUS — fuer die Insights-Kachel (Auftrag Abschnitt 14). Rein lesend, kein Seiteneffekt.
+// STATUS — fuer die Insights-Kachel (Auftrag Abschnitt 14/6). Rein lesend, kein Seiteneffekt.
 // ---------------------------------------------------------------------------
 async function getStatus() {
   const pending = await FIDB.getAll("sync_queue").catch(() => []);
   const loggedIn = await isLoggedIn();
-  const lastSyncAt = (() => { try { return localStorage.getItem("fi_last_cloud_sync_at"); } catch (e) { return null; } })();
+  const lastSyncAt = _lsGet("fi_last_cloud_sync_at");
+  const lastSyncAttemptAt = _lsGet("fi_last_sync_attempt_at");
+  const lastVerificationAt = _lsGet("fi_last_cloud_verification_at");
+  const lastVerificationAttemptAt = _lsGet("fi_last_cloud_verification_attempt_at");
+  const lastVerificationResult = _lsGetJson("fi_last_cloud_verification_result");
+  const lastRestoreResult = _lsGetJson("fi_last_cloud_restore_result");
   const sdkAvailable = getClient() !== null || (typeof window !== "undefined" && !!window.supabase);
   return {
-    loggedIn, sdkAvailable, pendingCount: pending.length, lastSyncAt,
+    loggedIn, sdkAvailable, pendingCount: pending.length, lastSyncAt, lastSyncAttemptAt,
+    lastVerificationAt, lastVerificationAttemptAt, lastVerificationResult, lastRestoreResult,
+    verificationDue: isVerificationDue(),
     online: typeof navigator !== "undefined" ? navigator.onLine : true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// v29 — TAEGLICHE BACKUP-VERIFIZIERUNG (Auftrag Abschnitt 5).
+//
+// "Verifiziert" bedeutet hier bewusst MEHR als "eine HTTP-Anfrage kam mit 200 zurueck": nach einem
+// erfolgreichen Leerlaufen der Warteschlange (flushQueue(), stillPending === 0) wird fuer JEDEN
+// CLOUD_STORES-Store zusaetzlich per Server-seitigem COUNT (PostgREST "count: exact, head: true" —
+// liefert NUR die Anzahl ueber den Content-Range-Header zurueck, KEINE Zeilen, also bewusst
+// leichtgewichtig statt eines vollen Downloads) geprueft, ob die Cloud-Seite mindestens so viele
+// nicht-getombstonte Zeilen enthaelt wie lokal vorhanden sind. Eine leere Warteschlange OHNE diesen
+// Zaehlervergleich waere kein ausreichender Nachweis — ein Upsert kann clientseitig als "erfolgreich"
+// (kein Fehler) zurueckkommen, obwohl serverseitig z.B. durch eine RLS-Regel oder eine fehlende Spalte
+// (siehe Root-Cause-Befund im v29-Bericht) tatsaechlich nichts geschrieben wurde. Ein Cloud-Zaehler,
+// der KLEINER ist als der lokale, ist das eindeutige Signal dafuer und laesst die Verifizierung
+// fehlschlagen, auch wenn flushQueue() selbst keinen Fehler gemeldet hat.
+//
+// Absichtlich NICHT geprueft: dass der Cloud-Zaehler nicht GROESSER als der lokale ist — ein anderes
+// Geraet desselben Nutzers kann legitim zusaetzliche Zeilen beigetragen haben, das ist erwuenscht,
+// kein Fehlerzustand.
+const VERIFICATION_MAX_AGE_MS = 24 * 3600 * 1000;
+
+function isVerificationDue(maxAgeMs = VERIFICATION_MAX_AGE_MS) {
+  const last = _lsGet("fi_last_cloud_verification_at");
+  if (!last) return true;
+  const t = new Date(last).getTime();
+  if (Number.isNaN(t)) return true;
+  return (Date.now() - t) > maxAgeMs;
+}
+
+// Reiner Zaehl-Request (kein Datendownload) — wird sowohl von verifyCloudCompleteness() als auch
+// von fetchCloudSummary() (Restore-Vorschau, Auftrag Abschnitt 8) genutzt. `.is("deleted_at", null)`
+// blendet Tombstones konsequent aus (Auftrag Abschnitt 10) — sowohl fuer die Verifizierung als auch
+// fuer die Restore-Vorschau soll ein absichtlich lokal geloeschter Testdatensatz nicht mitzaehlen.
+async function _remoteCount(client, store) {
+  try {
+    const { count, error } = await client.from(store).select("*", { count: "exact", head: true }).is("deleted_at", null);
+    if (error) return { ok: false, error: error.message || String(error) };
+    return { ok: true, count: count ?? 0 };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? e.message : String(e) };
+  }
+}
+
+async function verifyCloudCompleteness() {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return { ok: false, reason: "offline" };
+  if (!getClient()) await loadSupabaseSdk().catch(() => {});
+  const client = getClient();
+  if (!client) return { ok: false, reason: "sdk_unavailable" };
+  const session = await getSession();
+  if (!session) return { ok: false, reason: "not_authenticated" };
+
+  _lsSet("fi_last_cloud_verification_attempt_at", FIDB.nowIso());
+
+  // Erst die Warteschlange leeren — eine Verifizierung gegen eine bekanntermassen noch nicht
+  // hochgeladene Warteschlange waere sinnlos (sie wuerde immer als unvollstaendig erscheinen).
+  const flush = await flushQueue();
+  if (flush.stillPending > 0) {
+    const result = { ok: false, reason: "pending_after_flush", stillPending: flush.stillPending };
+    _lsSetJson("fi_last_cloud_verification_result", result);
+    return result;
+  }
+
+  const perStore = {};
+  let allOk = true;
+  for (const store of CLOUD_STORES) {
+    const localCount = (await FIDB.getAll(store).catch(() => [])).length;
+    const remote = await _remoteCount(client, store);
+    if (!remote.ok) { allOk = false; perStore[store] = { localCount, remoteCount: null, ok: false, error: remote.error }; continue; }
+    const ok = remote.count >= localCount;
+    if (!ok) allOk = false;
+    perStore[store] = { localCount, remoteCount: remote.count, ok };
+  }
+
+  const result = { ok: allOk, checkedAt: FIDB.nowIso(), perStore };
+  _lsSetJson("fi_last_cloud_verification_result", result);
+  if (allOk) _lsSet("fi_last_cloud_verification_at", FIDB.nowIso()); // NUR bei Erfolg — ein fehlgeschlagener Lauf darf den "gesichert"-Zeitstempel nicht verlaengern.
+  return result;
+}
+
+// Orchestrierung fuer die Ausfuehrungsgelegenheiten aus Auftrag Abschnitt 5 (App-Start, Vordergrund,
+// online-Event). Greift NUR, wenn tatsaechlich >24h seit der letzten ERFOLGREICHEN Verifizierung
+// vergangen sind (isVerificationDue()) — kein Intervall-Timer, kein aggressives Polling. Wird nie
+// awaited von einem Erfassungs-Flow, rein informativ/hintergrundseitig.
+async function runDailyVerificationIfDue() {
+  if (!isVerificationDue()) return { ran: false, reason: "not_due" };
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return { ran: false, reason: "offline" };
+  if (!(await isLoggedIn())) return { ran: false, reason: "not_authenticated" };
+  const result = await verifyCloudCompleteness();
+  return { ran: true, result };
+}
+
+// ---------------------------------------------------------------------------
+// v29 — CLOUD -> LOCAL RESTORE (Auftrag Abschnitt 7/8/9/10).
+//
+// KONFLIKTPOLITIK (bewusst einfach und einheitlich ueber alle 8 Stores, siehe v29-Bericht Abschnitt
+// "Konfliktpolitik" fuer die vollstaendige Herleitung): existiert lokal bereits ein Datensatz mit
+// derselben ID, wird er NIE durch die Cloud-Version ueberschrieben — unabhaengig davon, ob ein
+// updated_at-Vergleich rechnerisch moeglich waere. Nur echte "cloud-only"-IDs (keine lokale
+// Entsprechung) werden geschrieben. Das ist deterministisch, verletzt nie "preserve data rather than
+// destructively choosing one" und ist in der Praxis fuer den Hauptfall (leere/verlorene lokale DB)
+// vollstaendig wirksam, weil dort JEDE Cloud-ID cloud-only ist. Getombstonte Cloud-Zeilen
+// (deleted_at gesetzt) werden schon beim Laden ausgefiltert (siehe fetchCloudRestoreData()) und
+// daher nie wiederhergestellt — das loest Auftrag Abschnitt 10 (kein Wiederauftauchen absichtlich
+// lokal geloeschter Testdaten).
+// ---------------------------------------------------------------------------
+
+// Leichtgewichtige Vorschau (nur Zaehlwerte, Auftrag Abschnitt 8 "Cloud-Sicherung gefunden") — nutzt
+// denselben Zaehl-Mechanismus wie die Verifizierung, laedt bewusst KEINE vollen Datensaetze.
+async function fetchCloudSummary() {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return { ok: false, reason: "offline" };
+  if (!getClient()) await loadSupabaseSdk().catch(() => {});
+  const client = getClient();
+  if (!client) return { ok: false, reason: "sdk_unavailable" };
+  const session = await getSession();
+  if (!session) return { ok: false, reason: "not_authenticated" };
+  const perStore = {};
+  for (const store of CLOUD_STORES) {
+    const remote = await _remoteCount(client, store);
+    perStore[store] = remote.ok ? remote.count : null;
+  }
+  return { ok: true, perStore };
+}
+
+// Voller Download (nur beim tatsaechlichen Restore-Vorgang, NIE fuer die Vorschau) — pro Store ein
+// select("*"), Tombstones werden serverseitig herausgefiltert.
+async function fetchCloudRestoreData() {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return { ok: false, reason: "offline" };
+  if (!getClient()) await loadSupabaseSdk().catch(() => {});
+  const client = getClient();
+  if (!client) return { ok: false, reason: "sdk_unavailable" };
+  const session = await getSession();
+  if (!session) return { ok: false, reason: "not_authenticated" };
+  const byStore = {};
+  for (const store of CLOUD_STORES) {
+    try {
+      const { data, error } = await client.from(store).select("*").is("deleted_at", null);
+      if (error) return { ok: false, reason: "fetch_error", store, error: error.message || String(error) };
+      byStore[store] = data || [];
+    } catch (e) {
+      return { ok: false, reason: "fetch_error", store, error: (e && e.message) ? e.message : String(e) };
+    }
+  }
+  return { ok: true, byStore };
+}
+
+// environmental_snapshot kam relational+payload-aufgeteilt aus der Cloud zurueck (siehe
+// buildCloudPayload()) — fuer den lokalen IndexedDB-Store muss das wieder zu einem flachen Objekt
+// zusammengefuehrt werden (Umkehrung der Aufteilung).
+function _cloudRowToLocalRecord(store, row) {
+  if (store !== "environmental_snapshot") return row;
+  const { payload, user_id, device_id, synced_at, deleted_at, ...relational } = row;
+  return { ...relational, ...(payload || {}) };
+}
+
+// Reine, netzwerkfreie Funktion — daher deterministisch unit-testbar (siehe Testsuite). Nimmt bereits
+// geladene lokale + Cloud-Datensaetze pro Store entgegen und liefert einen Plan, OHNE etwas zu
+// schreiben (Auftrag Abschnitt 8: "vor Restore Vorschau, dann explizite Bestaetigung").
+function computeCloudRestorePlan(localByStore, cloudByStore) {
+  const byStore = {}; let totalNew = 0, totalKeptLocal = 0;
+  for (const store of CLOUD_STORES) {
+    const keyPath = FIDB.STORES[store];
+    const localRecords = localByStore[store] || [];
+    const cloudRows = cloudByStore[store] || [];
+    const localIds = new Set(localRecords.map((r) => r[keyPath]));
+    const toRestore = [], keptLocal = [];
+    for (const row of cloudRows) {
+      const id = row[keyPath];
+      if (localIds.has(id)) keptLocal.push(id);
+      else toRestore.push(_cloudRowToLocalRecord(store, row));
+    }
+    byStore[store] = { toRestore, keptLocalCount: keptLocal.length, cloudTotal: cloudRows.length, localTotal: localRecords.length };
+    totalNew += toRestore.length; totalKeptLocal += keptLocal.length;
+  }
+  return { byStore, totalNew, totalKeptLocal };
+}
+
+// Schreibt AUSSCHLIESSLICH die "toRestore"-Datensaetze aus dem Plan — ruft bewusst NIE enqueue()
+// auf (Auftrag Abschnitt 9: "restore darf keinen Sync-Loop erzeugen"): ein wiederhergestellter
+// Datensatz KOMMT aus der Cloud, ist dort also per Definition bereits vorhanden, ein erneutes
+// Hochladen waere sinnlos und wuerde nur unnoetig Warteschlangen-Eintraege erzeugen.
+async function executeCloudRestore(plan) {
+  let written = 0;
+  const perStore = {};
+  for (const [store, entry] of Object.entries(plan.byStore || {})) {
+    let n = 0;
+    for (const record of entry.toRestore) { await FIDB.put(store, record); n++; }
+    perStore[store] = n; written += n;
+  }
+  const result = { restoredAt: FIDB.nowIso(), written, perStore };
+  _lsSetJson("fi_last_cloud_restore_result", result);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// v29 — DIAGNOSTICS (Auftrag Abschnitt 14, nur unter ?hidebug=1). Rein lesend. Gibt bewusst NIE
+// SUPABASE_URL/SUPABASE_ANON_KEY zurueck (auch wenn der Anon-Key laut Begleitdokument oeffentlich
+// sicher ist, Auftrag Abschnitt 14: "Never expose credentials/secrets" — hier daher konservativ nur
+// ein Boolean statt der Werte selbst).
+// ---------------------------------------------------------------------------
+async function getDiagnostics() {
+  const status = await getStatus();
+  const localCounts = {};
+  for (const store of CLOUD_STORES) localCounts[store] = (await FIDB.getAll(store).catch(() => [])).length;
+  const pendingByStore = {};
+  for (const q of await FIDB.getAll("sync_queue").catch(() => [])) {
+    pendingByStore[q.store] = pendingByStore[q.store] || { upserts: 0, deletes: 0 };
+    if (q.op === "delete") pendingByStore[q.store].deletes++; else pendingByStore[q.store].upserts++;
+  }
+  return {
+    ...status,
+    cloudConfigured: !!SUPABASE_URL && !!SUPABASE_ANON_KEY,
+    localCounts,
+    pendingByStore,
+    verificationDue: isVerificationDue(),
   };
 }
 
@@ -237,7 +513,10 @@ if (typeof window !== "undefined") {
 }
 
 window.FISync = {
-  CLOUD_STORES, enqueue, flushQueue, getStatus, getSession, isLoggedIn,
+  CLOUD_STORES, enqueue, enqueueTombstone, enqueueTombstones, flushQueue, getStatus, getSession, isLoggedIn,
   signInWithMagicLink, signOut, onAuthStateChange, loadSupabaseSdk,
+  isVerificationDue, verifyCloudCompleteness, runDailyVerificationIfDue,
+  fetchCloudSummary, fetchCloudRestoreData, computeCloudRestorePlan, executeCloudRestore,
+  getDiagnostics,
   _setClientForTesting, _reset, buildCloudPayload,
 };
