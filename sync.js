@@ -17,7 +17,7 @@
 // gecacht, weil sie ohnehin nur mit Netz sinnvoll ist (siehe sw.js-Kommentar).
 
 const SUPABASE_URL = "https://vqqqemrodbjsypvxxhry.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_xeRdY-Cd2gtDn9mluNHkgA_F_GXNAd"; // publishable/anon Key -- durch RLS abgesichert, bewusst oeffentlich im Client, siehe Begleitdokument Abschnitt 5. NIEMALS den service_role Key hier eintragen.
+const SUPABASE_ANON_KEY = "sb_publishable_xeRdY-Cd2gtDn9mluNHkgA_F_GXNAdH"; // publishable/anon Key -- durch RLS abgesichert, bewusst oeffentlich im Client, siehe Begleitdokument Abschnitt 5. NIEMALS den service_role Key hier eintragen.
 const SUPABASE_SDK_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js";
 
 // Store->Tabellenname ist 1:1 identisch (siehe supabase_setup.sql). Nur diese 8 Stores werden

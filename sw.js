@@ -5,16 +5,28 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v29-1"; // v29.1: VERSION LABEL MICRO-HOTFIX (04.09.2026).
-// Reines UI-Hotfix, KEIN Scoring-/Modell-/DB-/Cloud-Code veraendert: permanent sichtbares, dezentes
-// Versions-Label ("Fishing Intelligence · v29.1") oben auf dem Co-Pilot-Hauptbildschirm, aus
-// APP_BUILD abgeleitet (js/app.js: deriveVersionLabel/APP_VERSION_LABEL) — einzige Quelle der
-// Wahrheit, kuenftige Releases muessen nur noch APP_BUILD + dieser CACHE_NAME angehoben werden. Kein
-// Debug-Modus noetig; der volle APP_BUILD bleibt zusaetzlich unveraendert unter ?hidebug=1 sichtbar.
-// Geaenderte Dateien: js/app.js (APP_BUILD-String, neues Label, viewCoPilot()), css/style.css (neue
-// .app-version-tag-Regel). KEINE Aenderung an DB_VERSION (bleibt 8), IndexedDB-Schema, Supabase/
-// Cloud-Backup-Logik oder v28/v29-Datenintegritaetsverhalten. KEINE Aenderung an HI-2B/HI-2C/
-// Champion/WHAT/Personal Fishing Window.
+const CACHE_NAME = "fishintel-shell-v29-2"; // v29.2: CLOUD-KEY-CACHE-MICROHOTFIX (04.09.2026).
+// Reiner Cache-Bust + Versionsanhebung, KEINE Logik-/Modell-/DB-/Schema-Aenderung: js/sync.js wurde
+// LOKAL bereits korrigiert (SUPABASE_ANON_KEY war um genau EIN Zeichen verkuerzt — "Invalid API key"
+// serverseitig) — diese Korrektur war aber vom Nutzer bereits vorher vorgenommen worden und wirkte
+// wegen des Service-Worker-Cache-first-Verhaltens (CACHE_NAME "fishintel-shell-v29-1") auf einem
+// bereits installierten Geraet nicht: der Service Worker lieferte weiterhin die ALTE, gecachte
+// js/sync.js aus. Diese CACHE_NAME-Anhebung (wie schon bei jedem vorigen Sprint, siehe Kommentar oben
+// in dieser Datei) erzwingt einen sauberen Neuabruf ALLER SHELL_FILES vom Netz, inkl. der bereits
+// korrigierten js/sync.js, und loescht den alten Cache beim naechsten Service-Worker-Update (siehe
+// "activate"-Event unten, unveraendert). APP_BUILD in js/app.js parallel auf v29.2 angehoben (gleiche
+// Konvention wie v29.1) — das Versions-Label auf dem Co-Pilot-Bildschirm zeigt automatisch
+// "Fishing Intelligence · v29.2" (aus APP_BUILD abgeleitet, siehe deriveVersionLabel()/
+// APP_VERSION_LABEL in js/app.js, keine eigene Aenderung dort noetig ausser dem APP_BUILD-String
+// selbst). KEINE Aenderung an DB_VERSION (bleibt 8), IndexedDB-Schema/-Daten, Supabase-Schema,
+// Auth-/Sync-/Verifizierungs-/Restore-/Tombstone-Logik, Champion/Challenger/HI-2B/HI-2C/WHAT/
+// Fangindex/Spot-Logik/Datenmodell. Keine neue SQL-Migration. Kein Site-Data-Reset/keine
+// IndexedDB-Loeschung — der Service-Worker-Cache betrifft ausschliesslich die App-Shell-Dateien
+// (HTML/CSS/JS/Icons), niemals IndexedDB (siehe js/db.js, komplett getrennter Speicher).
+// v29.1 (davor): VERSION LABEL MICRO-HOTFIX — permanent sichtbares, dezentes Versions-Label oben auf
+// dem Co-Pilot-Hauptbildschirm, aus APP_BUILD abgeleitet (js/app.js: deriveVersionLabel/
+// APP_VERSION_LABEL) — einzige Quelle der Wahrheit. Geaenderte Dateien damals: js/app.js
+// (APP_BUILD-String, neues Label, viewCoPilot()), css/style.css (neue .app-version-tag-Regel).
 // v29 (davor): Fishing Intelligence v1 — Reliable Cloud Backup
 // (04.09.2026). DATA-SAFETY-Sprint, KEINE neue Fishing Intelligence, KEIN Scoring-/Modell-Code
 // veraendert (Champion/Fangindex/HI-2B/HI-2C/SPOT_STATS/WHAT/historisches Fangbuch unveraendert,
