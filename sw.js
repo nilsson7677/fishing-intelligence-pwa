@@ -5,7 +5,51 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v28"; // v28: Fishing Intelligence v1 — Data Integrity + 29-Spot
+const CACHE_NAME = "fishintel-shell-v29"; // v29: Fishing Intelligence v1 — Reliable Cloud Backup
+// (04.09.2026). DATA-SAFETY-Sprint, KEINE neue Fishing Intelligence, KEIN Scoring-/Modell-Code
+// veraendert (Champion/Fangindex/HI-2B/HI-2C/SPOT_STATS/WHAT/historisches Fangbuch unveraendert,
+// per Diff verifiziert — siehe claude/PHASE_RELIABLE_CLOUD_BACKUP_V29_IMPLEMENTATION_REPORT.md).
+// AUDIT-BEFUND (root weakness): der Cloud-Tabellen-Schema-Stand aus Phase 6B (supabase_setup.sql,
+// 26.08.2026) kennt die in v28 neu eingefuehrten fishing_session-Felder status/completed_at/
+// abandoned_at/legacy_recovered NICHT — jeder Upsert einer fishing_session mit diesen Feldern
+// schlaegt seit v28 serverseitig mit "column does not exist" fehl (PostgREST), was ueber die FK
+// session_id->fishing_session AUCH catch_event/trip_track-Uploads fuer denselben Trip blockiert.
+// Local First hat das bisher unsichtbar folgenlos gehalten (Warteschlange blieb einfach pending),
+// aber KEIN Datensatz dieser Art wurde seit v28 tatsaechlich cloud-gesichert. Behoben durch additive
+// Cloud-Schema-Migration (supabase_migration_v29.sql, vom Nutzer manuell in Supabase auszufuehren —
+// dieses Sandbox kann weder das Supabase-Projekt erreichen noch DDL ausfuehren, siehe Bericht
+// "Known Limitations").
+// NEU: (1) Tombstones (deleted_at-Spalte auf allen 8 Cloud-Tabellen, additiv) — lokal absichtlich
+// geloeschte Testdaten (Insights -> Testdaten bereinigen) schreiben jetzt vor dem lokalen Loeschen
+// einen Tombstone-Marker in die sync_queue (op:"delete"), der beim naechsten Sync-Lauf NUR
+// deleted_at auf der bestehenden Cloud-Zeile setzt (kein DELETE, keine DELETE-RLS-Policy noetig/
+// vorhanden) — verhindert, dass "Cloud -> Lokal wiederherstellen" solche Datensaetze zurueckbringt.
+// (2) Taegliche Verifizierung (FISync.verifyCloudCompleteness()): mehr als "HTTP 200" — nach
+// erfolgreichem Leerlaufen der Warteschlange wird pro Cloud-Store ein leichtgewichtiger
+// Server-Zaehl-Request (count:exact,head:true, kein Datendownload) gegen einen lokalen Zaehler
+// verglichen; nur bei Erfolg wird der "gesichert"-Zeitstempel (>24h-Pruefung) fortgeschrieben.
+// Ausfuehrungsgelegenheiten: App-Start, online-Event, Vordergrund (visibilitychange), nach
+// Trip-Abschluss, manueller "Jetzt sichern"-Button — kein Intervall-Timer/Polling.
+// (3) Cloud -> Lokal Restore (Insights -> Datensicherheit -> "Aus Cloud wiederherstellen"):
+// leichtgewichtige Zaehl-Vorschau vor jeder Schreibaktion, MERGE BY STABLE ID (nur echte
+// cloud-only-IDs werden geschrieben, ein bereits lokal vorhandener Datensatz wird NIE ueberschrieben
+// — deterministische, destruktionsfreie Konfliktpolitik, siehe Bericht), Tombstones werden beim
+// Laden serverseitig ausgefiltert. Restore-Schreibvorgaenge rufen bewusst NIE enqueue() auf (kein
+// Restore-Sync-Loop). (4) Vier-Zustand-Status-UI unter Insights ("☁️ Gesichert"/"⏳ Sicherung
+// ausstehend"/"⚠️ Cloud-Sicherung nicht aktuell"/"❌ Cloud nicht erreichbar") — "Gesichert" NIE allein
+// aus leerer Warteschlange abgeleitet, sondern nur nach einer tatsaechlich erfolgreichen
+// Verifizierung <24h. (5) Neues rein lesendes "Cloud Backup Diagnostics"-Debug-Panel unter
+// ?hidebug=1 (Insights) — Queue/Sync/Verifizierungs-/Restore-Zeitstempel + lokale Store-Zaehler,
+// NIE Zugangsdaten. Store-Klassifikation (Auftrag Abschnitt 12): MUST BACKUP fishing_session/
+// catch_event/intelligence_report/observation/trip_track/user_vocabulary/shadow_evaluation, SHOULD
+// BACKUP environmental_snapshot (alle bereits Teil von FISync.CLOUD_STORES seit Phase 6B,
+// unveraendert), RECREATABLE/kein Restore noetig hourly_shadow_snapshot/
+// hourly_window_shadow_prediction/where_spot_shadow_prediction (bereits vorher NICHT cloud-gesichert,
+// Entscheidung nur bestaetigt/dokumentiert, kein Code-Vorgang). JSON-Backup/-Restore (Phase 6A)
+// bleibt vollstaendig unveraendert als zweite, unabhaengige Sicherheitsebene. KEINE DB_VERSION-
+// Aenderung (bleibt 8 — der neue sync_queue-Eintrag "op" ist ein rein additives, optionales Feld auf
+// bereits vorhandenen Dokumenten, kein neuer Store/Index). KEIN neuer SHELL_FILES-Eintrag (alle
+// Aenderungen in js/sync.js und js/app.js, keine neue Datei). v28: Fishing Intelligence v1 — Data Integrity + 29-Spot
 // Product Coverage + Personal Fishing Window (04.09.2026). DREI Teile, alle Model-Scope-Lock-konform
 // (Champion/Fangindex/HI-2B/HI-2C/SPOT_STATS/WHAT/historische Daten unveraendert):
 // TEIL A (Data Integrity): fishing_session existiert jetzt SOFORT bei Trip-Start (status

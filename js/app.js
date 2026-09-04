@@ -30,7 +30,7 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "fishing-intelligence-v1-data-integrity-v28-2026-09-04";
+const APP_BUILD = "fishing-intelligence-v1-reliable-cloud-backup-v29-2026-09-04";
 
 const STATE = {
   view: "copilot",
@@ -122,19 +122,37 @@ async function init() {
     // PHASE 6B (Cloud Backup): bei Wiederherstellung der Verbindung erneut synchronisieren
     // (Auftrag Abschnitt 12) — kein Toast bei Erfolg/Misserfolg noetig, siehe Cloud-Status-Kachel
     // in Insights (Abschnitt 14); ein Fehler hier ist niemals ein Nutzer-sichtbarer Fehler.
-    if (window.FISync) FISync.flushQueue().then((r) => { if (STATE.view === "insights") renderView(); }).catch(() => {});
+    if (window.FISync) FISync.flushQueue().then((r) => { if (STATE.view === "insights") renderView(); }).then(() => triggerDailyCloudVerificationIfDue()).catch(() => {});
   });
   window.addEventListener("offline", updateOfflineBadge);
   updateOfflineBadge();
+
+  // v29 (Auftrag Abschnitt 5 — Ausfuehrungsgelegenheit "Vordergrund"): document.visibilitychange
+  // feuert u.a. beim Zurueckwechseln aus dem Hintergrund/anderen Tabs auf einem Handy (PWA erneut
+  // sichtbar). Greift wie flushQueue() nur, wenn tatsaechlich >24h seit der letzten erfolgreichen
+  // Verifizierung vergangen sind (siehe FISync.isVerificationDue()) — kein Polling, kein Intervall.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") triggerDailyCloudVerificationIfDue();
+  });
 
   if (navigator.onLine) {
     FIEnrichment.retryPendingQueue().then((r) => { if (r.done) UI.toast(`${r.done} Umweltdaten-Snapshot(s) nachtraeglich ergaenzt.`, "success"); });
     // PHASE 6B (Cloud Backup): stiller Sync-Versuch bei App-Start (Auftrag Abschnitt 12) — greift
     // nur, wenn SDK geladen, Netz vorhanden UND Nutzer eingeloggt ist; sonst folgenloser No-Op.
-    if (window.FISync) FISync.flushQueue().then(() => { if (STATE.view === "insights") renderView(); }).catch(() => {});
+    if (window.FISync) FISync.flushQueue().then(() => { if (STATE.view === "insights") renderView(); }).then(() => triggerDailyCloudVerificationIfDue()).catch(() => {});
   }
 
   renderView();
+}
+
+// v29 (Auftrag Abschnitt 5): duenner Wrapper um FISync.runDailyVerificationIfDue() fuer die drei
+// Ausfuehrungsgelegenheiten (App-Start, online, Vordergrund) — niemals awaited vom aufrufenden Flow,
+// aktualisiert nur bei sichtbarem Effekt die Insights-Ansicht (falls der Nutzer gerade dort ist).
+function triggerDailyCloudVerificationIfDue() {
+  if (!window.FISync) return;
+  FISync.runDailyVerificationIfDue().then((r) => {
+    if (r && r.ran && STATE.view === "insights") renderView();
+  }).catch(() => { /* rein hintergrundseitig, niemals nutzersichtbar als Fehler (Local First) */ });
 }
 
 function updateOfflineBadge() {
@@ -1535,7 +1553,16 @@ async function finalizeTripWithOutcome(root, caught, count) {
   s.gps_track_point_count = STATE.trip.track.length;
   s.has_gps_track = STATE.trip.track.length > 0;
   await FIDB.put("fishing_session", s);
-  if (window.FISync) FISync.enqueue("fishing_session", s.session_id);
+  if (window.FISync) {
+    FISync.enqueue("fishing_session", s.session_id);
+    // v29 (Auftrag Abschnitt 4B — Ausfuehrungsgelegenheit "nach einem neuen lokalen Schreibvorgang"):
+    // ein abgeschlossener Trip ist der bedeutsamste Einzel-Schreibvorgang der App (Session + Fang(e) +
+    // GPS-Route) — ein EINMALIGER, nicht awaiteter Sync-Versuch direkt danach ist kein "aggressives
+    // Polling" (Auftrag Abschnitt 4B), sondern genau die im Auftrag genannte Gelegenheit. Lokal ist
+    // zu diesem Zeitpunkt (FIDB.put oben) bereits vollstaendig abgeschlossen — Local First bleibt
+    // gewahrt, ein Fehlschlag hier ist folgenlos (Warteschlange bleibt bestehen, naechster Trigger).
+    FISync.flushQueue().catch(() => {});
+  }
   // Trip ist abgeschlossen — active_trip_state (Recovery-Zustand) wird nicht mehr gebraucht.
   await clearActiveTripState();
   UI.toast(`Trip gespeichert (${s.duration_minutes} Min., ${s.is_blank_trip ? "Nullrunde" : s.result_fish_count + " Fisch(e)"}). Umweltdaten werden im Hintergrund ergänzt…`, "success");
@@ -2173,9 +2200,22 @@ async function buildSessionCascadePlan(sessionId) {
 // gelöschter inkonsistenter Zustand" bei einem Fehler).
 async function deleteFishingSessionCascade(sessionId) {
   const plan = await buildSessionCascadePlan(sessionId);
-  const allDeletions = plan.deletions.slice();
-  for (const key of plan.syncQueueKeys) allDeletions.push({ store: "sync_queue", key });
-  await FIDB.deleteMany(allDeletions);
+  // v29 (Auftrag Abschnitt 10 — Tombstones): VOR dem eigentlichen lokalen Loeschen fuer jeden
+  // betroffenen Cloud-Store einen Tombstone-Queue-Eintrag anlegen (ersetzt den bisherigen normalen
+  // Queue-Eintrag fuer dieselbe ID). Dadurch schreibt der naechste flushQueue()-Lauf einen
+  // deleted_at-Marker auf die Cloud-Zeile, statt den Datensatz einfach unsynchronisiert zu lassen —
+  // das verhindert, dass ein spaeteres "Cloud -> Lokal wiederherstellen" (Auftrag Abschnitt 7/8)
+  // diese absichtlich geloeschten Testdaten unbemerkt zurueckbringt (Auftrag Abschnitt 10). Die
+  // physische Cloud-Zeile bleibt dabei bestehen (siehe Hinweistext in buildCleanupSessionRow oben) —
+  // nur als "geloescht" markiert, nie destruktiv entfernt (keine DELETE-Policy noetig/vorhanden).
+  if (window.FISync) { try { await FISync.enqueueTombstones(plan.deletions); } catch (e) { /* lokal folgenlos, siehe sync.js */ } }
+  // v29: die zugehoerigen sync_queue-Eintraege werden NICHT MEHR hier geloescht (anders als v27) —
+  // enqueueTombstones() hat sie oben bereits durch Tombstone-Eintraege (op:"delete") mit demselben
+  // deterministischen queue_key ERSETZT (FIDB.put ueberschreibt). Wuerden sie hier zusaetzlich
+  // geloescht, wuerde genau dieser gerade geschriebene Tombstone wieder entfernt, bevor er jemals
+  // synchronisiert werden konnte — der naechste flushQueue()-Lauf entfernt den Tombstone-Eintrag
+  // ganz regulaer selbst, sobald er erfolgreich in die Cloud geschrieben wurde (siehe sync.js).
+  await FIDB.deleteMany(plan.deletions);
   return plan;
 }
 
@@ -2285,10 +2325,11 @@ function renderTestDataCleanupSection(root) {
   ]));
 }
 
-// PHASE 6B (Automatic Cloud Backup, 26.08.2026): Inhalt der "☁️ Cloud-Sicherung"-Kachel in
-// Insights. Rendert je nach Status (SDK/Login/Queue) — siehe FISync.getStatus() (sync.js).
-// Keine technische Sync-Konsole (Auftrag Abschnitt 14) — nur die vier erlaubten Zustaende plus
-// Login/Logout/manueller-Sync-Button.
+// PHASE 6B (Automatic Cloud Backup, 26.08.2026) / v29 (RELIABLE CLOUD BACKUP, Auftrag Abschnitt
+// 6/7): Inhalt der "☁️ Cloud-Sicherung"-Kachel in Insights ("Datensicherheit"-Bereich). Rendert je
+// nach Status (SDK/Login/Queue/Verifizierung) — siehe FISync.getStatus() (sync.js). Keine technische
+// Sync-Konsole (Auftrag Abschnitt 6: "Do not expose technical jargon as the primary UI") — nur die
+// vier erlaubten Zustaende plus Login/Logout/manueller-Sync-Button/Wiederherstellung.
 async function renderCloudBackupPanel(slot) {
   slot.innerHTML = "";
   if (!window.FISync) {
@@ -2320,31 +2361,118 @@ async function renderCloudBackupPanel(slot) {
     return;
   }
 
-  // Eingeloggt: Status-Kachel gemaess Auftrag Abschnitt 14 (drei erlaubte Zustaende + Zeitstempel).
-  let line, icon;
-  if (!status.online || !status.sdkAvailable) { icon = "⚠️"; line = "Cloud-Sicherung nicht verbunden"; }
-  else if (status.pendingCount > 0) { icon = "⏳"; line = `${status.pendingCount} Eintrag${status.pendingCount === 1 ? "" : "e"} warten auf Sicherung`; }
-  else { icon = "✓"; line = "Aktuell"; }
+  // v29 (Auftrag Abschnitt 6): GENAU die vier vorgegebenen, menschenlesbaren Zustaende — Reihenfolge
+  // der Prüfung entspricht der im Auftrag gezeigten Priorität (nicht erreichbar > ausstehend >
+  // nicht aktuell > gesichert). "Gesichert" wird NIEMALS allein daraus abgeleitet, dass die
+  // Warteschlange leer ist (Auftrag Abschnitt 6, letzter Satz) — zusaetzlich muss eine tatsaechlich
+  // ERFOLGREICHE Verifizierung (FISync.verifyCloudCompleteness(), Abschnitt 5) nicht laenger als 24h
+  // zurueckliegen (status.verificationDue === false).
+  let icon, line, sub = null;
+  if (!status.online || !status.sdkAvailable) {
+    icon = "❌"; line = "Cloud nicht erreichbar";
+    sub = !status.online ? "Kein Netz — alle anderen Funktionen sind davon nicht betroffen." : "Cloud-Baustein konnte nicht geladen werden.";
+  } else if (status.pendingCount > 0) {
+    icon = "⏳"; line = "Sicherung ausstehend";
+    sub = `${status.pendingCount} Datensatz${status.pendingCount === 1 ? "" : "e"} warten auf Upload`;
+  } else if (status.verificationDue) {
+    icon = "⚠️"; line = "Cloud-Sicherung nicht aktuell";
+    sub = status.lastVerificationAt ? `Letzte erfolgreiche Prüfung: ${UI.fmtRelativeDe ? UI.fmtRelativeDe(status.lastVerificationAt) : new Date(status.lastVerificationAt).toLocaleString("de-DE")}` : "Noch nie erfolgreich geprüft.";
+  } else {
+    icon = "☁️"; line = "Gesichert";
+    sub = `Zuletzt geprüft: ${new Date(status.lastVerificationAt).toLocaleString("de-DE")}`;
+  }
   slot.appendChild(UI.el("div", {}, `${icon} ${line}`));
+  if (sub) slot.appendChild(UI.el("div", { class: "subtext" }, sub));
   if (status.lastSyncAt) {
     slot.appendChild(UI.el("div", { class: "subtext" }, `Letzte Cloud-Sicherung: ${new Date(status.lastSyncAt).toLocaleString("de-DE")}`));
   }
   slot.appendChild(UI.el("div", { class: "btn-row", style: "margin-top:8px;" }, [
     UI.el("button", { class: "btn btn-secondary", onclick: async (ev) => {
-      ev.target.disabled = true; ev.target.textContent = "Synchronisiere…";
-      const r = await FISync.flushQueue();
-      ev.target.disabled = false; ev.target.textContent = "Jetzt synchronisieren";
+      ev.target.disabled = true; ev.target.textContent = "Sichere…";
+      // v29 (Auftrag Abschnitt 6): "Jetzt sichern" loest einen ECHTEN Sync- UND Verifizierungs-
+      // Versuch aus (nicht nur flushQueue()) — verifyCloudCompleteness() ruft flushQueue() intern
+      // bereits mit auf (siehe sync.js), daher genuegt hier ein einziger Aufruf.
+      const r = await FISync.verifyCloudCompleteness();
+      ev.target.disabled = false; ev.target.textContent = "Jetzt sichern";
       if (r.reason === "offline") UI.toast("Kein Netz — wird automatisch nachgeholt, sobald wieder online.", "");
-      else if (r.done > 0) UI.toast(`${r.done} Eintrag${r.done === 1 ? "" : "e"} gesichert.`, "success");
-      else if (r.stillPending > 0) UI.toast("Synchronisierung teilweise fehlgeschlagen, wird später erneut versucht.", "");
+      else if (r.reason === "pending_after_flush") UI.toast("Synchronisierung teilweise fehlgeschlagen, wird später erneut versucht.", "");
+      else if (r.ok) UI.toast("Cloud-Sicherung geprüft und aktuell.", "success");
+      else UI.toast("Prüfung fehlgeschlagen — wird später erneut versucht. Lokale Daten sind unverändert vorhanden.", "error");
       if (STATE.view === "insights") renderView();
-    } }, "Jetzt synchronisieren"),
+    } }, "Jetzt sichern"),
     UI.el("button", { class: "btn btn-ghost", onclick: async (ev) => {
       await FISync.signOut();
       UI.toast("Abgemeldet. Lokale Daten sind unverändert vorhanden.", "success");
       if (STATE.view === "insights") renderView();
     } }, "Abmelden"),
   ]));
+
+  slot.appendChild(await buildCloudRestoreSection());
+}
+
+// v29 (Auftrag Abschnitt 7/8) — "☁️ Aus Cloud wiederherstellen": standardmaessig eingeklappt
+// (gleiches Muster wie "Details & Rohdaten"/"Testdaten bereinigen"), zeigt beim Aufklappen zunaechst
+// NUR eine leichtgewichtige Vorschau (FISync.fetchCloudSummary(), reine Zaehlwerte, kein Download —
+// Auftrag Abschnitt 8), schreibt aber ERST nach einer expliziten zweiten Bestaetigung tatsaechlich
+// lokal (FISync.fetchCloudRestoreData() + computeCloudRestorePlan() + executeCloudRestore()).
+const CLOUD_STORE_LABELS_DE = {
+  fishing_session: "Trips", catch_event: "Fänge", intelligence_report: "Intelligence-Meldungen",
+  observation: "Beobachtungen", environmental_snapshot: "Umwelt-Snapshots", user_vocabulary: "Vokabeleinträge",
+  shadow_evaluation: "Shadow-Vergleichsdatensätze", trip_track: "GPS-Tracks",
+};
+async function buildCloudRestoreSection() {
+  const wrap = UI.el("div", { style: "margin-top:12px;" });
+  const body = UI.el("div", { class: "details-body hidden" });
+  let opened = false;
+  const toggle = UI.el("div", { class: "details-toggle", onclick: async () => {
+    body.classList.toggle("hidden");
+    if (!body.classList.contains("hidden") && !opened) { opened = true; await renderCloudRestorePreview(body); }
+  } }, "☁️ Aus Cloud wiederherstellen — Vorschau anzeigen");
+  wrap.appendChild(toggle);
+  wrap.appendChild(body);
+  return wrap;
+}
+
+async function renderCloudRestorePreview(body) {
+  body.innerHTML = "";
+  body.appendChild(UI.el("div", { class: "subtext" }, "Lade Vorschau…"));
+  const summary = await FISync.fetchCloudSummary();
+  body.innerHTML = "";
+  if (!summary.ok) {
+    const reasons = { offline: "Kein Netz.", sdk_unavailable: "Cloud-Baustein nicht verfügbar.", not_authenticated: "Nicht angemeldet." };
+    body.appendChild(UI.el("div", { class: "subtext" }, reasons[summary.reason] || "Vorschau derzeit nicht verfügbar."));
+    return;
+  }
+  body.appendChild(UI.el("div", { class: "cleanup-confirm-headline" }, "Cloud-Sicherung gefunden"));
+  const list = UI.el("div", { class: "subtext" });
+  for (const store of FISync.CLOUD_STORES) {
+    const n = summary.perStore[store];
+    list.appendChild(UI.el("div", {}, `${CLOUD_STORE_LABELS_DE[store] || store}: ${n === null ? "unbekannt" : n}`));
+  }
+  body.appendChild(list);
+  body.appendChild(UI.el("div", { class: "subtext" }, "Bereits lokal vorhandene Datensätze (gleiche ID) werden NICHT überschrieben — nur Datensätze, die lokal fehlen, werden ergänzt. Absichtlich gelöschte Testdaten werden nicht wiederhergestellt."));
+  const resultSlot = UI.el("div", {});
+  body.appendChild(UI.el("div", { class: "btn-row", style: "margin-top:8px;" }, [
+    UI.el("button", { class: "btn btn-danger", onclick: async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = "Stelle wieder her…";
+      resultSlot.innerHTML = "";
+      const data = await FISync.fetchCloudRestoreData();
+      if (!data.ok) {
+        resultSlot.appendChild(UI.el("div", { class: "subtext" }, "Wiederherstellung fehlgeschlagen: " + (data.error || data.reason)));
+        ev.target.disabled = false; ev.target.textContent = "Jetzt wiederherstellen";
+        return;
+      }
+      const localByStore = {};
+      for (const store of FISync.CLOUD_STORES) localByStore[store] = await FIDB.getAll(store);
+      const plan = FISync.computeCloudRestorePlan(localByStore, data.byStore);
+      const result = await FISync.executeCloudRestore(plan);
+      ev.target.disabled = false; ev.target.textContent = "Jetzt wiederherstellen";
+      UI.toast(`Wiederherstellung abgeschlossen: ${result.written} Datensatz${result.written === 1 ? "" : "e"} ergänzt.`, "success");
+      resultSlot.appendChild(UI.el("div", { class: "cleanup-confirm-headline" }, `${result.written} Datensätze ergänzt.`));
+      if (STATE.view === "insights") renderView();
+    } }, "Jetzt wiederherstellen"),
+  ]));
+  body.appendChild(resultSlot);
 }
 
 // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 8): zentrale Status-Ableitung fuer fishing_session.
@@ -2392,6 +2520,38 @@ async function renderDataIntegrityDebugPanel(root, sessions, catches, abandonedS
     (orphanTracks.length ? "\n\n⚠ orphan trip_track (session_id ohne fishing_session):\n" + orphanTracks.map((t) => `  ${t.session_id} | ${t.points.length}pt`).join("\n") : "")
   ));
   wrap.appendChild(table);
+  root.appendChild(wrap);
+}
+
+// v29 (Auftrag Abschnitt 14) — "Cloud Backup Diagnostics", rein lesend, nur ?hidebug=1. Nutzt
+// FISync.getDiagnostics() (sync.js), das bewusst NIE SUPABASE_URL/ANON_KEY zurueckgibt.
+async function renderCloudDiagnosticsDebugPanel(root) {
+  const wrap = UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
+    UI.el("div", { class: "panel-label" }, "☁️🩺 Cloud Backup Diagnostics (Debug, ?hidebug=1, Auftrag v29 Abschnitt 14)"),
+  ]);
+  if (!window.FISync) {
+    wrap.appendChild(UI.el("div", { class: "subtext" }, "FISync nicht geladen."));
+    root.appendChild(wrap);
+    return;
+  }
+  const d = await FISync.getDiagnostics();
+  const fmt = (iso) => iso ? new Date(iso).toLocaleString("de-DE") : "–";
+  const lines = [
+    `APP_BUILD: ${APP_BUILD}`,
+    `cloud konfiguriert: ${d.cloudConfigured ? "ja" : "nein"} | online: ${d.online ? "ja" : "nein"} | SDK geladen: ${d.sdkAvailable ? "ja" : "nein"} | angemeldet: ${d.loggedIn ? "ja" : "nein"}`,
+    `pending sync_queue gesamt: ${d.pendingCount}`,
+    ...Object.entries(d.pendingByStore).map(([store, c]) => `  · ${store}: ${c.upserts} Upload(s), ${c.deletes} Tombstone(s)`),
+    `letzter Sync-Versuch: ${fmt(d.lastSyncAttemptAt)} | letzter ERFOLGREICHER Sync: ${fmt(d.lastSyncAt)}`,
+    `letzter Verifizierungs-Versuch: ${fmt(d.lastVerificationAttemptAt)} | letzte ERFOLGREICHE Verifizierung: ${fmt(d.lastVerificationAt)} | faellig: ${d.verificationDue ? "ja (>24h)" : "nein"}`,
+    d.lastVerificationResult ? `letztes Verifizierungsergebnis: ${JSON.stringify(d.lastVerificationResult)}` : "letztes Verifizierungsergebnis: –",
+    "",
+    "lokale Datensätze je Cloud-Store:",
+    ...Object.entries(d.localCounts).map(([store, n]) => `  · ${store}: ${n}`),
+    "",
+    d.lastRestoreResult ? `letztes Restore-Ergebnis: ${JSON.stringify(d.lastRestoreResult)}` : "letztes Restore-Ergebnis: noch nie ausgeführt.",
+  ];
+  wrap.appendChild(UI.el("div", { style: "margin-top:4px;font-family:monospace;font-size:11px;white-space:pre-wrap;max-height:300px;overflow:auto;border:1px solid var(--panel-border);padding:6px;" },
+    lines.join("\n")));
   root.appendChild(wrap);
 }
 
@@ -2513,6 +2673,10 @@ async function viewInsights() {
   // catch_events (session_id ohne passende fishing_session), den aktuellen active_trip_state
   // (Singleton) sowie die trip_track-Beziehung (inkl. verwaister trip_track-Eintraege).
   if (HI_DEBUG) await renderDataIntegrityDebugPanel(root, sessions, catches, abandonedSessions);
+
+  // v29 (Auftrag Abschnitt 14): rein LESENDES "Cloud Backup Diagnostics"-Panel unter ?hidebug=1.
+  // Gibt bewusst NIE Zugangsdaten/Secrets zurueck (siehe FISync.getDiagnostics()).
+  if (HI_DEBUG) await renderCloudDiagnosticsDebugPanel(root);
 
   const tenDaysAgo = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
   const recent = reports.filter((r) => r.catch_date && r.catch_date >= tenDaysAgo);
