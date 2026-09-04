@@ -5,7 +5,17 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v29"; // v29: Fishing Intelligence v1 — Reliable Cloud Backup
+const CACHE_NAME = "fishintel-shell-v29-1"; // v29.1: VERSION LABEL MICRO-HOTFIX (04.09.2026).
+// Reines UI-Hotfix, KEIN Scoring-/Modell-/DB-/Cloud-Code veraendert: permanent sichtbares, dezentes
+// Versions-Label ("Fishing Intelligence · v29.1") oben auf dem Co-Pilot-Hauptbildschirm, aus
+// APP_BUILD abgeleitet (js/app.js: deriveVersionLabel/APP_VERSION_LABEL) — einzige Quelle der
+// Wahrheit, kuenftige Releases muessen nur noch APP_BUILD + dieser CACHE_NAME angehoben werden. Kein
+// Debug-Modus noetig; der volle APP_BUILD bleibt zusaetzlich unveraendert unter ?hidebug=1 sichtbar.
+// Geaenderte Dateien: js/app.js (APP_BUILD-String, neues Label, viewCoPilot()), css/style.css (neue
+// .app-version-tag-Regel). KEINE Aenderung an DB_VERSION (bleibt 8), IndexedDB-Schema, Supabase/
+// Cloud-Backup-Logik oder v28/v29-Datenintegritaetsverhalten. KEINE Aenderung an HI-2B/HI-2C/
+// Champion/WHAT/Personal Fishing Window.
+// v29 (davor): Fishing Intelligence v1 — Reliable Cloud Backup
 // (04.09.2026). DATA-SAFETY-Sprint, KEINE neue Fishing Intelligence, KEIN Scoring-/Modell-Code
 // veraendert (Champion/Fangindex/HI-2B/HI-2C/SPOT_STATS/WHAT/historisches Fangbuch unveraendert,
 // per Diff verifiziert — siehe claude/PHASE_RELIABLE_CLOUD_BACKUP_V29_IMPLEMENTATION_REPORT.md).

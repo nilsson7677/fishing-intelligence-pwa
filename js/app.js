@@ -30,7 +30,22 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "fishing-intelligence-v1-reliable-cloud-backup-v29-2026-09-04";
+const APP_BUILD = "fishing-intelligence-v1-reliable-cloud-backup-v29.1-2026-09-04";
+
+// v29.1 (Auftrag "VERSION LABEL MICRO-HOTFIX", reines UI-Hotfix): das dezente, dauerhaft sichtbare
+// Versions-Label auf dem Co-Pilot-Hauptbildschirm (siehe viewCoPilot()) wird aus APP_BUILD
+// ABGELEITET statt separat gepflegt zu werden — einzige Quelle der Wahrheit, wie vom Auftrag
+// gefordert ("derive/display the version from a single source of truth"). Kuenftige Releases muessen
+// nur noch APP_BUILD (und, wie bisher, sw.js CACHE_NAME) anheben; das sichtbare Label folgt
+// automatisch. Erwartetes Suffix-Muster: "...-v<major>[.<minor>]-<YYYY-MM-DD>" (z.B. "v29", "v29.1").
+// Fallback auf den vollen APP_BUILD-String, falls das Muster einmal nicht passt, damit nie ein
+// leeres/fehlerhaftes Label entsteht — der volle APP_BUILD bleibt ohnehin unveraendert in den
+// Debug-Diagnostics (?hidebug=1) sichtbar.
+function deriveVersionLabel(build) {
+  const m = /-v(\d+(?:\.\d+)?)-\d{4}-\d{2}-\d{2}$/.exec(build);
+  return m ? `v${m[1]}` : build;
+}
+const APP_VERSION_LABEL = deriveVersionLabel(APP_BUILD);
 
 const STATE = {
   view: "copilot",
@@ -238,6 +253,12 @@ async function renderView() {
 // ---------------------------------------------------------------------------
 async function viewCoPilot() {
   const root = UI.el("div", {});
+  // v29.1 (Micro-Hotfix): permanent sichtbares, bewusst dezentes Versions-Label — "near the top",
+  // vor der Kontext-Pille/Hero-Karte, damit es der primaeren "Lohnt es sich?"-Hierarchie (Hero-Card
+  // weiter unten) nicht die Aufmerksamkeit streitig macht. Kein Debug-Modus noetig (anders als das
+  // bestehende ?hidebug=1-Diagnostics-Panel, das den vollen APP_BUILD zeigt). Reine Anzeige, keine
+  // Logik-/Datenwirkung.
+  root.appendChild(UI.el("div", { class: "app-version-tag" }, `Fishing Intelligence · ${APP_VERSION_LABEL}`));
   const speciesList = await FIDB.getAll("species");
   const waterList = await FIDB.getAll("water");
 
