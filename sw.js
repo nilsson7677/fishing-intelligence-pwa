@@ -5,7 +5,25 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v26"; // v26: Fishing Intelligence v1 — Product Finish Sprint
+const CACHE_NAME = "fishintel-shell-v27"; // v27: Fishing Intelligence v1 — Test Data Cleanup Sprint
+// (03.09.2026). NEUE, rein additive Funktion "Testdaten bereinigen" unter Insights (Datenverwaltung):
+// der Nutzer kann einzelne, EXPLIZIT ausgewaehlte eigene Touren (fishing_session) samt tatsaechlich
+// verknuepfter Datensaetze (catch_event/trip_track/environmental_snapshot/shadow_evaluation, siehe
+// vollstaendiges Datenmodell-Audit in claude/PHASE_DATA_CLEANUP_IMPLEMENTATION_REPORT.md) endgueltig
+// loeschen — KEINE automatische Testdaten-Erkennung, KEIN "Alle loeschen", KEIN IndexedDB-Reset. NEUE
+// Hilfsfunktion FIDB.deleteMany() (js/db.js) fuehrt die Loeschung in EINER atomaren IndexedDB-
+// Transaktion ueber alle betroffenen Stores aus. intelligence_report/observation/die drei globalen
+// HI-Forecast-Caches (hourly_shadow_snapshot/hourly_window_shadow_prediction/
+// where_spot_shadow_prediction)/Referenzdaten (species/water/spot)/Spot Intelligence Metadata werden
+// NIE angefasst (nachweislich nicht session-gebunden bzw. globale/Referenzdaten). Pending
+// sync_queue-Eintraege der geloeschten Datensaetze werden mitbereinigt, damit nichts erneut in die
+// Cloud geschrieben wird — die Cloud-Kopie (Supabase) selbst kann von dieser rein lokalen Funktion
+// NICHT geloescht werden, das wird im UI-Hinweistext und im Sprint-Bericht ehrlich dokumentiert.
+// KEINE DB_VERSION-Aenderung (bleibt 8, kein neuer Store/Index/Feld). KEIN SHELL_FILES-Eintrag
+// hinzugekommen (keine neue Skriptdatei, die Funktion lebt additiv in js/app.js/js/db.js/
+// css/style.css). Champion/Fangindex/SPOT_STATS/HI-1/HI-2A/HI-2A.1/HI-2B/HI-2C/HI-2C.1-Spot-
+// Metadaten/WHAT-Intelligence/5-Tage-Logik/Co-Pilot-Entscheidungslogik unveraendert (Model Scope
+// Lock, Auftrag Abschnitt 10). v26: Fishing Intelligence v1 — Product Finish Sprint
 // (03.09.2026). NEUE Datei js/what-intelligence.js (window.FIWhatIntelligence, WHAT_SCORING_IMPACT
 // = "none"): erstmals produktsichtbare Koeder-/Fliegen-Intelligenz, AUSSCHLIESSLICH aus der bereits
 // dokumentierten Sea Trout Lure & Fly Intelligence KB (claude/sea_trout_lure_fly_intelligence_kb_v1.md),
