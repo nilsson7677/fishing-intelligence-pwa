@@ -30,7 +30,7 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "fishing-intelligence-v1-data-cleanup-v27-2026-09-03";
+const APP_BUILD = "fishing-intelligence-v1-data-integrity-v28-2026-09-04";
 
 const STATE = {
   view: "copilot",
@@ -380,10 +380,79 @@ async function ensureWhereWhenAnalysis(waterId, maxAgeMs = 2 * 3600 * 1000) {
   return result;
 }
 
+// v28 PERSONAL FISHING WINDOW (Auftrag Teil C, Abschnitt 17-23, 04.09.2026): eigener, gecachter
+// Aufruf von FIHourlyWindowIntelligence.runWhenShadowAnalysis() — bewusst GETRENNT vom obigen
+// WHERE-Cache, weil runWhereShadowAnalysis() (HI-2C, Model-Scope-Locked) nur day.whenBestWindow
+// (das EINE, unbeschraenkte HI-2B-Bestfenster) nach aussen gibt, nicht aber die fuer den
+// Korridor-Filter benoetigten vollstaendigen Stunden-/dayMin/dayMax-Rohdaten (day.hours/
+// day.dailyDiagnostics) — dafuer muesste where-spot-intelligence.js selbst veraendert werden, was
+// Model Scope Lock Teil D verbietet. Ein zweiter Aufruf derselben Art existiert bereits (unveraendert)
+// im bestehenden HI-2B-Debug-Panel weiter unten — dieselbe Funktion, hier nur zusaetzlich mit
+// 2h-Cache produktiv nutzbar gemacht. HI-2B selbst (hourly-window-intelligence.js) wird dadurch NICHT
+// veraendert, nur ein weiteres Mal mit denselben Parametern aufgerufen.
+let _personalWindowCache = null; // { waterId, fetchedAt, result }
+async function ensurePersonalWindowAnalysis(waterId, maxAgeMs = 2 * 3600 * 1000) {
+  if (_personalWindowCache && _personalWindowCache.waterId === waterId && (Date.now() - _personalWindowCache.fetchedAt) < maxAgeMs) {
+    return _personalWindowCache.result;
+  }
+  if (!window.FIHourlyWindowIntelligence || !navigator.onLine) {
+    return _personalWindowCache?.result || { supported: false, status: "offline_or_unavailable", days: [] };
+  }
+  let result;
+  try {
+    const raw = await FIHourlyWindowIntelligence.runWhenShadowAnalysis(waterId, { horizonHours: 120 });
+    result = { supported: true, ...raw };
+  } catch (e) {
+    result = { supported: false, status: "error", reasons: [e.message], days: [] };
+  }
+  _personalWindowCache = { waterId, fetchedAt: Date.now(), result };
+  return result;
+}
+
+// v28 (Auftrag Teil C, Abschnitt 19): erlaubter Sonnenkorridor + bestes erlaubtes Fenster fuer EINEN
+// lokalen Tag, aus dem bereits geladenen HI-2B-Tagesergebnis (dayResult, aus
+// ensurePersonalWindowAnalysis().days) + Sonnenauf-/-untergang genau dieses Tages (dieselbe
+// Astro-Quelle wie der 5-Tage-Ausblick, siehe buildMefoCopilotPanels). Reine Orchestration —
+// die eigentliche Filterlogik lebt vollstaendig in personal-fishing-window.js.
+function buildPersonalWindowForLocalDate(personalDays, localDate, refLat, refLon, astro) {
+  const dayResult = (personalDays || []).find((d) => d.localDate === localDate) || null;
+  if (!dayResult || !window.FIPersonalWindow) {
+    return { status: "unavailable", corridor: null, rawBestWindow: dayResult ? dayResult.bestWindow : null, allowedResult: { status: "unavailable", allowedWindow: null, durationHours: null }, dailyContrast: dayResult ? dayResult.dailyDiagnostics?.dailyContrast : null };
+  }
+  const dUtcMidnight = new Date(localDate + "T00:00:00Z"); // Abschnitt 19: Naeherung Berlin-Kalendertag ~ UTC-Kalendertag, identisches Muster wie beim bestehenden 5-Tage-Ausblick (astro.getSunEvents ist DST-agnostisch, siehe astro.js)
+  const sunEvents = astro.getSunEvents(refLat, refLon, dUtcMidnight);
+  const personal = window.FIPersonalWindow.buildPersonalWindowForDay(dayResult, sunEvents);
+  return { ...personal, dailyContrast: dayResult.dailyDiagnostics?.dailyContrast || null };
+}
+
+// "Wann?" (persoenliches, korridorgefiltertes Fenster) — Abschnitt 20: ehrlicher Fallback-Text, wenn
+// innerhalb des erlaubten Korridors kein Fenster berechenbar ist, statt stillschweigend ein
+// Nachtfenster zu zeigen oder einfach zu kappen.
+function buildPersonalWhenPresentation(personalWindowResult) {
+  if (!personalWindowResult || personalWindowResult.status === "corridor_unavailable" || personalWindowResult.status === "unavailable") {
+    return { text: "Persönliches Zeitfenster derzeit nicht berechenbar (Sonnendaten/Prognose unvollständig).", contrastNote: null, confidenceLabel: null };
+  }
+  const ar = personalWindowResult.allowedResult;
+  if (!ar || ar.status !== "ok" || !ar.allowedWindow) {
+    return { text: "Kein zuverlässig empfehlbares Zeitfenster innerhalb des persönlichen Tageskorridors (Sonnenaufgang −1h bis Sonnenuntergang +1h).", contrastNote: null, confidenceLabel: null };
+  }
+  const w = ar.allowedWindow;
+  const start = new Date(w.startTimestamp);
+  const displayEnd = new Date(new Date(w.endTimestamp).getTime() + 3600000);
+  return {
+    text: `Bestes Zeitfenster (${ar.durationHours}h, innerhalb deines Tageskorridors) · ca. ${fmtApproxTime(start)}–${fmtApproxTime(displayEnd)}`,
+    contrastNote: personalWindowResult.dailyContrast === "low" ? "Über den Tag nur geringe Unterschiede." : null,
+    confidenceLabel: confLabelDe(whenConfEnToDe(w.confidence)),
+  };
+}
+
 // "Wann?" — Auftrag Abschnitt 5/6: bestes Zeitfenster als "ca."-Spanne (keine Scheinpraezision,
 // gleiches Prinzip wie die bisherige Daemmerungsfenster-Anzeige), Kontrast-Hinweis NUR wenn die
 // Unterschiede ueber den Tag tatsaechlich gering sind (dailyContrast === "low" aus HI-2B) — sonst
 // KEINE Behauptung einer starken Ueberlegenheit.
+// v28: bleibt UNVERAENDERT als reine Rohdaten-Praesentationsfunktion fuer das RAW-HI-2B-Fenster im
+// ?hidebug=1-Transparenzpanel (Abschnitt 22) — die produktive Hauptanzeige nutzt jetzt
+// buildPersonalWhenPresentation() oben.
 function buildWhenPresentation(dayWW) {
   if (!dayWW || !dayWW.whenBestWindow) {
     return { text: "Bestes Zeitfenster derzeit nicht berechenbar (Prognosedaten unvollständig).", contrastNote: null };
@@ -460,13 +529,19 @@ function buildLiveConditionsPanel(snap, waterPhase, todayWW) {
 // wiederverwendet), + bestes HI-2B-Zeitfenster, + HI-2C-Status (Top-Spot NUR bei ausreichendem
 // Kontrast, sonst ehrlich "Keine klare Spot-Differenzierung" statt eines willkuerlichen
 // Tie-Breaking-Spots) — NIE ein erfundener Spot, wenn WHERE fuer diesen Tag keine Daten liefert.
-function buildFiveDayItem(entry, whereWhenResult) {
+// v28 (Auftrag Teil C, Abschnitt 23): "dieselbe Regel gilt fuer jeden Tag im 5-Tage-Ausblick" — jeder
+// Tag bekommt hier seinen EIGENEN Sonnenkorridor + sein eigenes erlaubtes bestes Fenster
+// (buildPersonalWindow(localDate), von buildMefoCopilotPanels() uebergeben), NIE ein Nachtfenster
+// ausserhalb der persoenlichen Grenze.
+function buildFiveDayItem(entry, whereWhenResult, buildPersonalWindow) {
   const key = localDateKeyBerlin(entry.date);
   const dWW = whereWhenResult && whereWhenResult.supported ? whereWhenResult.days.find((d) => d.localDate === key) : null;
-  const when = buildWhenPresentation(dWW);
-  const whenText = dWW && dWW.whenBestWindow
-    ? `ca. ${fmtApproxTime(new Date(dWW.whenBestWindow.startTimestamp))}–${fmtApproxTime(new Date(new Date(dWW.whenBestWindow.endTimestamp).getTime() + 3600000))} (Datenlage: ${when.confidenceLabel || "niedrig"})`
-    : "Zeitfenster nicht berechenbar";
+  const personal = buildPersonalWindow ? buildPersonalWindow(key) : null;
+  const personalPresentation = buildPersonalWhenPresentation(personal);
+  const ar = personal && personal.allowedResult;
+  const whenText = (ar && ar.status === "ok" && ar.allowedWindow)
+    ? `ca. ${fmtApproxTime(new Date(ar.allowedWindow.startTimestamp))}–${fmtApproxTime(new Date(new Date(ar.allowedWindow.endTimestamp).getTime() + 3600000))} (Datenlage: ${personalPresentation.confidenceLabel || "niedrig"})`
+    : "Kein Fenster im persönlichen Tageskorridor";
   let whereText;
   const where = buildWherePresentation(dWW);
   if (where.mode === "top3") whereText = where.list[0].name;
@@ -510,8 +585,18 @@ async function buildMefoCopilotPanels() {
   const todayWW = whereWhenResult && whereWhenResult.supported
     ? (whereWhenResult.days.find((d) => d.localDate === todayKey) || whereWhenResult.days[0] || null) : null;
 
+  // v28 PERSONAL FISHING WINDOW (Auftrag Teil C, Abschnitt 17-23): eigener HI-2B-Lauf fuer die
+  // vollstaendigen Stunden-Rohdaten (siehe ensurePersonalWindowAnalysis oben, Begruendung fuer den
+  // separaten Aufruf dort). HI-2B selbst unveraendert, gecacht analog zum WHERE-Ergebnis.
+  const personalWindowResult = await ensurePersonalWindowAnalysis(waterId);
+
   const forecast = await ensureForecastDaily(waterId, refLat, refLon, today, 5);
   const astro = new FIAstro.NOAAAstroProvider();
+  // Abschnitt 23: JEDER Tag bekommt seinen eigenen Sonnenkorridor + sein eigenes erlaubtes bestes
+  // Fenster — kein globaler/geteilter Korridor ueber alle 5 Tage.
+  const buildPersonalWindow = (localDate) => buildPersonalWindowForLocalDate(
+    personalWindowResult && personalWindowResult.supported ? personalWindowResult.days : [], localDate, refLat, refLon, astro);
+  const todayPersonalWindow = buildPersonalWindow(todayKey);
   const dayEntries = [];
   for (let i = 0; i < 5; i++) {
     const d = new Date(today.getTime() + i * 86400000);
@@ -542,7 +627,13 @@ async function buildMefoCopilotPanels() {
   const warumReasonsAll = FIMefoModel.buildWarumReasons(
     today.getUTCMonth() + 1, todayEntry.wassertemp, todayEntry.tFactor, topSpot, waterLevelCandidate);
   const warumReasonsChampion = warumReasonsAll.slice(0, 2);
-  const warumShadow = shadowWarumFromWhen(todayWW);
+  // v28 (Auftrag Teil C, Abschnitt 22): "Warum" muss zum tatsaechlich ANGEZEIGTEN Fenster passen —
+  // seit die Hauptanzeige das persoenlich gefilterte Fenster zeigt (statt des rohen HI-2B-Fensters),
+  // liest der Warum-Text jetzt dessen reasons (gleiche Funktion shadowWarumFromWhen unveraendert,
+  // nur mit einem anders befuellten "dayWW"-foermigen Objekt gefuettert — kein HI-2B-Code veraendert).
+  const warumShadow = (todayPersonalWindow?.allowedResult?.status === "ok" && todayPersonalWindow.allowedResult.allowedWindow)
+    ? shadowWarumFromWhen({ whenBestWindow: todayPersonalWindow.allowedResult.allowedWindow, dailyContrast: todayPersonalWindow.dailyContrast })
+    : null;
 
   // SPRINT 3.1 (Punkt 7): "beste Aussicht der naechsten Tage" — bewusst GETRENNT von pickNochBesser
   // (das ist nur eine SCHWELLENWERT-gebundene, deutliche Verbesserung gegenueber heute). Hier: rein
@@ -552,8 +643,12 @@ async function buildMefoCopilotPanels() {
   const bestOutlook = futureDays.reduce((best, d) =>
     (d.index !== null && (best === null || d.index > best.index) ? d : best), null);
 
-  // ---- "WANN?" (HI-2B, Auftrag Abschnitt 5/6) ----
-  const whenInfo = buildWhenPresentation(todayWW);
+  // ---- "WANN?" (HI-2B + v28 Personal Fishing Window, Auftrag Teil C Abschnitt 17-23) — zeigt jetzt
+  // das auf den persoenlichen Tageskorridor (Sonnenaufgang -1h bis Sonnenuntergang +1h) gefilterte
+  // beste Fenster statt des rohen, ggf. naechtlichen HI-2B-Bestfensters. Das rohe HI-2B-Fenster
+  // bleibt vollstaendig einsehbar im ?hidebug=1-Transparenzpanel (buildWhenPresentation(todayWW),
+  // unveraendert). ----
+  const whenInfo = buildPersonalWhenPresentation(todayPersonalWindow);
   // ---- "WO?" (HI-2C, Auftrag Abschnitt 7/8) ----
   const whereInfo = buildWherePresentation(todayWW);
   // ---- "WAS?" (WHAT, Auftrag Abschnitt 11-14) — Kontext AUSSCHLIESSLICH aus bereits geladenen
@@ -700,7 +795,7 @@ async function buildMefoCopilotPanels() {
     wrap.appendChild(UI.el("div", { class: "outlook-caption" },
       `⭐ ${weekdayLong(bestOutlook.date)} · ${bestOutlook.label.toUpperCase()} — beste Aussicht der nächsten Tage`));
   }
-  wrap.appendChild(UI.el("div", { class: "panel" }, dayEntries.map((entry) => buildFiveDayItem(entry, whereWhenResult))));
+  wrap.appendChild(UI.el("div", { class: "panel" }, dayEntries.map((entry) => buildFiveDayItem(entry, whereWhenResult, buildPersonalWindow))));
 
   // ---- DETAILS & ROHDATEN (eingeklappt: Strategie-/Bedingungen-Panel + Spot-Rangliste, jetzt
   // zusaetzlich die historische Spot-Option (Auftrag Abschnitt 9: Spot-Metadaten/-Historie bleiben
@@ -747,6 +842,31 @@ async function buildMefoCopilotPanels() {
         "Die Abschnitte „Wo?“ oben gehen von Ufer-Angeln aus (bislang einzige fachlich validierte HI-2C-Kombination). " +
         "Für Boot ist die dynamische Spot-Empfehlung noch nicht validiert."),
     ]),
+    // v28 PERSONAL FISHING WINDOW (Auftrag Teil C, Abschnitt 22/23) — rein lesendes Transparenzpanel:
+    // RAW HI-2B-Bestfenster (unveraendert, unbeschraenkt) NEBEN dem erlaubten Tageskorridor UND dem
+    // tatsaechlich empfohlenen (gefilterten) Fenster, fuer HEUTE UND jeden Tag im 5-Tage-Ausblick
+    // einzeln — beweist, dass HI-2B selbst unveraendert bleibt und nur eine Produkt-Filterung
+    // stattfindet (Abschnitt 22 explizit gefordert).
+    HI_DEBUG ? UI.el("div", { class: "panel" }, [
+      UI.el("div", { class: "panel-label" }, `🕐 Personal Fishing Window (Debug, ?hidebug=1, Auftrag v28 Abschnitt 22/23)`),
+      UI.el("div", { class: "subtext" }, window.FIPersonalWindow
+        ? `Konfiguration: Sonnenaufgang ${window.FIPersonalWindow.FISHING_WINDOW_PREFERENCE.sunriseOffsetMinutes} min · Sonnenuntergang ${window.FIPersonalWindow.FISHING_WINDOW_PREFERENCE.sunsetOffsetMinutes > 0 ? "+" : ""}${window.FIPersonalWindow.FISHING_WINDOW_PREFERENCE.sunsetOffsetMinutes} min.`
+        : "personal-fishing-window.js nicht geladen."),
+      ...dayEntries.map((entry) => {
+        const key = localDateKeyBerlin(entry.date);
+        const p = buildPersonalWindow(key);
+        const rawText = p.rawBestWindow
+          ? `${fmtApproxTime(new Date(p.rawBestWindow.startTimestamp))}–${fmtApproxTime(new Date(new Date(p.rawBestWindow.endTimestamp).getTime() + 3600000))}`
+          : "kein Fenster";
+        const corridorText = p.corridor ? `${fmtApproxTime(p.corridor.allowedStart)}–${fmtApproxTime(p.corridor.allowedEnd)}` : "nicht berechenbar";
+        const ar = p.allowedResult;
+        const recText = (ar && ar.status === "ok" && ar.allowedWindow)
+          ? `${fmtApproxTime(new Date(ar.allowedWindow.startTimestamp))}–${fmtApproxTime(new Date(new Date(ar.allowedWindow.endTimestamp).getTime() + 3600000))} (${ar.durationHours}h)`
+          : `kein Fenster (${ar ? ar.status : p.status})`;
+        return UI.el("div", { class: "subtext", style: "font-family:monospace;font-size:11px;margin-top:4px;" },
+          `${key}${key === localDateKeyBerlin(today) ? " (heute)" : ""}: RAW HI-2B ${rawText} · Erlaubt ${corridorText} · Empfohlen ${recText}`);
+      }),
+    ]) : null,
     UI.el("button", { class: "btn btn-ghost", onclick: async (ev) => {
       ev.target.textContent = "Lädt…"; ev.target.disabled = true;
       try {
@@ -809,7 +929,14 @@ async function viewAngeln() {
   root.appendChild(UI.el("button", { class: "btn btn-secondary", style: "margin-bottom:10px;", onclick: () => renderObservationForm(root) }, "👁 Beobachtung erfassen"));
   root.appendChild(UI.el("button", { class: "btn btn-secondary", style: "margin-bottom:16px;", onclick: () => renderTripScreen(root) }, "🎣 Trip starten (optional)"));
 
-  const sessions = (await FIDB.getAll("fishing_session")).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 10);
+  // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 8 sinngemaess): seit fishing_session bereits bei
+  // Trip-Start (status "in_progress") angelegt wird, wuerde diese Liste ohne Filter jetzt auch noch
+  // laufende bzw. verworfene Trips als vermeintlich abgeschlossene Faenge/Nullrunden anzeigen (z.B.
+  // "0x mefo" fuer einen gerade erst gestarteten Trip) — hier bewusst weiterhin nur ABGESCHLOSSENE
+  // Eintraege, konsistent mit dem "Eigene Trips"-Zaehler in Insights. Laufende/verworfene Trips
+  // bleiben ausschliesslich im Data-Integrity-Debug-Panel sichtbar (?hidebug=1).
+  const sessions = (await FIDB.getAll("fishing_session")).filter((s) => tripStatus(s) === "completed")
+    .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 10);
   root.appendChild(UI.el("h2", {}, "Letzte eigene Einträge"));
   if (!sessions.length) {
     root.appendChild(UI.el("div", { class: "empty-state" }, "Noch keine eigenen Fänge/Trips erfasst."));
@@ -849,7 +976,7 @@ function renderCatchForm(root) {
 
   const dateInput = UI.el("input", { type: "date", value: isoToday() });
   const daypartSel = UI.el("select", {}, ["unknown", "dawn", "morning", "midday", "afternoon", "evening", "dusk", "night"].map((d) => UI.el("option", { value: d }, UI.fmtDayPart(d))));
-  const countInput = UI.el("input", { type: "number", min: "0", value: "1" });
+  const countInput = UI.el("input", { type: "number", min: "1", value: "1" });
   const blankCheck = UI.el("input", { type: "checkbox" });
   const lengthInput = UI.el("input", { type: "number", step: "1", placeholder: "z.B. 55" });
   const lengthApprox = UI.el("input", { type: "checkbox", checked: "checked" });
@@ -865,7 +992,31 @@ function renderCatchForm(root) {
   root.appendChild(UI.el("label", {}, "Tageszeit")); root.appendChild(daypartSel);
   root.appendChild(UI.el("label", {}, "Anzahl")); root.appendChild(countInput);
   root.appendChild(UI.el("div", { class: "check-row" }, [blankCheck, "Nullrunde (0 Fische)"]));
-  blankCheck.addEventListener("change", () => { if (blankCheck.checked) countInput.value = "0"; });
+  // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 7): Fang vs. Nullrunde muessen sich GEGENSEITIG
+  // AUSSCHLIESSEN, statt wie bisher unabhaengig voneinander lesbar zu sein (vorheriger Bug: die
+  // Checkbox setzte countInput beim Ankreuzen zwar auf "0", aber ein erneutes Abwaehlen stellte den
+  // Zaehler NIE wieder her — beim Speichern wurde ausschliesslich countInput.value gelesen, die
+  // Checkbox selbst gar nicht mehr abgefragt. Ergebnis: ein Nutzer, der "Nullrunde" aus Versehen an-
+  // und wieder abwaehlte, verlor kommentarlos seinen echten Fang, OHNE dass ein catch_event je
+  // entstand — plausibler Root-Cause fuer den vom Nutzer gemeldeten Barsch-Fang, der als 0 Faenge
+  // landete). Jetzt: Checkbox sperrt/leert das Zaehlfeld waehrend sie aktiv ist UND merkt sich den
+  // zuletzt eingegebenen Wert, um ihn beim Abwaehlen wiederherzustellen — es kann nie beides
+  // gleichzeitig "wahr" sein (count>0 UND Nullrunde angekreuzt).
+  let _lastNonZeroCount = "1";
+  countInput.addEventListener("input", () => {
+    const n = parseInt(countInput.value || "0", 10);
+    if (n > 0) _lastNonZeroCount = String(n);
+  });
+  blankCheck.addEventListener("change", () => {
+    if (blankCheck.checked) {
+      if (parseInt(countInput.value || "0", 10) > 0) _lastNonZeroCount = countInput.value;
+      countInput.value = "0";
+      countInput.disabled = true;
+    } else {
+      countInput.disabled = false;
+      countInput.value = _lastNonZeroCount || "1";
+    }
+  });
   root.appendChild(UI.el("label", {}, "Länge (cm)")); root.appendChild(lengthInput);
   root.appendChild(UI.el("div", { class: "check-row" }, [lengthApprox, "nur ungefähr (keine exakte Messung)"]));
   root.appendChild(UI.el("label", {}, "Köder")); root.appendChild(lureInput);
@@ -874,32 +1025,57 @@ function renderCatchForm(root) {
 
   const btnRow = UI.el("div", { class: "btn-row" }, [
     UI.el("button", { class: "btn btn-secondary", onclick: () => renderView() }, "Abbrechen"),
-    UI.el("button", { class: "btn btn-primary", onclick: async () => {
-      const count = parseInt(countInput.value || "0", 10);
+    UI.el("button", { class: "btn btn-primary", onclick: async (ev) => {
+      // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 7): count/Nullrunde sind jetzt strukturell
+      // exklusiv (siehe Checkbox-Handler oben), hier zusaetzlich eine explizite Validierung statt
+      // eines stillen Speicherns eines mehrdeutigen Zustands — ein Fang OHNE Nullrunde-Haekchen MUSS
+      // eine Anzahl >= 1 haben, sonst wird gar nichts gespeichert und der Nutzer bekommt eine klare
+      // Fehlermeldung (Abschnitt 6: "kein falsches 'gespeichert' bei fehlgeschlagenem Schreiben" —
+      // sinngemaess auch fuer einen erst gar nicht sinnvoll speicherbaren Eingabezustand).
+      const count = blankCheck.checked ? 0 : parseInt(countInput.value || "0", 10);
+      if (!blankCheck.checked && count <= 0) {
+        UI.toast("Bitte eine Anzahl ≥ 1 eingeben oder „Nullrunde“ ankreuzen.", "error");
+        return;
+      }
       const session = {
         session_id: FIDB.newId("sess"), angler: "Nils", species_target: speciesSel.value,
         water_id: waterSel.value, spot_id: spotSel.value || null, date: dateInput.value,
         day_part: daypartSel.value, time_precision: daypartSel.value === "unknown" ? "unknown" : "approximate",
         result_fish_count: count, result_contact_count: 0, is_blank_trip: count === 0,
         notes: notesInput.value, source_quality: "A_own_verified", created_at: FIDB.nowIso(),
+        // v28 (Auftrag Teil A, Abschnitt 8): Quick-Log-Eintraege sind per Definition sofort
+        // vollstaendig/abgeschlossen — explizites status-Feld statt Verlass auf den Legacy-Fallback
+        // (fehlendes status == "completed"), damit neue Eintraege ab v28 immer explizit sind.
+        status: "completed",
         species_specific: {}, data_origin: "prospective_app_own", // PHASE 6A, Auftrag Punkt 9
       };
-      await FIDB.put("fishing_session", session);
-      if (window.FISync) FISync.enqueue("fishing_session", session.session_id);
-      if (count > 0) {
-        const catchEvent = {
-          catch_id: FIDB.newId("catch"), session_id: session.session_id, species: speciesSel.value,
-          length_cm: lengthInput.value ? parseFloat(lengthInput.value) : null,
-          length_precision: lengthInput.value ? (lengthApprox.checked ? "approximate" : "exact") : "unknown",
-          catch_time: null, day_part: daypartSel.value, spot_id: spotSel.value || null,
-          lure_type: lureInput.value || null, lure_color: colorInput.value || null,
-          created_at: FIDB.nowIso(), species_specific: {}, data_origin: "prospective_app_own",
-        };
-        await FIDB.put("catch_event", catchEvent);
-        if (window.FISync) FISync.enqueue("catch_event", catchEvent.catch_id);
+      // v28 (Auftrag Teil A, Abschnitt 6): Schreiben VOLLSTAENDIG abwarten UND absichern — bei einem
+      // Fehler (z.B. IndexedDB-Quota) darf NIE ein "gespeichert"-Toast erscheinen; der Nutzer bekommt
+      // stattdessen eine explizite Fehlermeldung und kann erneut versuchen (Eingaben bleiben erhalten,
+      // kein renderView()).
+      let catchEvent = null;
+      try {
+        await FIDB.put("fishing_session", session);
+        if (window.FISync) FISync.enqueue("fishing_session", session.session_id);
+        if (count > 0) {
+          catchEvent = {
+            catch_id: FIDB.newId("catch"), session_id: session.session_id, species: speciesSel.value,
+            length_cm: lengthInput.value ? parseFloat(lengthInput.value) : null,
+            length_precision: lengthInput.value ? (lengthApprox.checked ? "approximate" : "exact") : "unknown",
+            catch_time: null, day_part: daypartSel.value, spot_id: spotSel.value || null,
+            lure_type: lureInput.value || null, lure_color: colorInput.value || null,
+            created_at: FIDB.nowIso(), species_specific: {}, data_origin: "prospective_app_own",
+          };
+          await FIDB.put("catch_event", catchEvent);
+          if (window.FISync) FISync.enqueue("catch_event", catchEvent.catch_id);
+        }
+      } catch (e) {
+        UI.toast("Speichern fehlgeschlagen: " + e.message + " — bitte erneut versuchen.", "error");
+        return;
       }
-      // Speichern + Navigation sofort; Environmental Enrichment laeuft im Hintergrund weiter
-      // (gleiche Begruendung wie bei saveDraft() — siehe Kommentar dort).
+      // Speichern + Navigation sofort (Schreiben oben bereits vollstaendig abgewartet);
+      // Environmental Enrichment laeuft im Hintergrund weiter (gleiche Begruendung wie bei
+      // saveDraft() — siehe Kommentar dort).
       UI.toast("Fang gespeichert. Umweltdaten werden im Hintergrund ergänzt…", "success");
       STATE.view = "angeln"; renderView();
       FIEnrichment.enrich(waterSel.value, dateInput.value, daypartSel.value, "approximate", null, "session", session.session_id)
@@ -1006,8 +1182,26 @@ async function renderTripRecoveryScreen() {
     UI.el("div", { class: "subtext" }, `Gestartet: ${new Date(rec.start_time).toLocaleString("de-DE")} · ${pointCount} GPS-Punkt(e) bereits gespeichert.`),
     UI.el("div", { class: "subtext" }, "Die Routenaufzeichnung selbst muss nach dem Fortsetzen ggf. erneut gestartet werden (🔴-Button) — bereits aufgezeichnete Punkte bleiben in jedem Fall erhalten."),
     UI.el("div", { class: "btn-row", style: "margin-top:12px;" }, [
-      UI.el("button", { class: "btn btn-primary", onclick: () => {
-        STATE.trip.session = { ...rec };
+      UI.el("button", { class: "btn btn-primary", onclick: async () => {
+        // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 3): ein v27-Alt-active_trip_state OHNE
+        // passende fishing_session bekommt beim expliziten "Fortsetzen" jetzt idempotent eine
+        // persistente Session (Abgleich per get() VOR dem put() verhindert Duplikate bei
+        // mehrfachem Fortsetzen). Existiert die Session bereits (v28-Trip), wird sie unveraendert
+        // uebernommen — nichts wird hier ueberschrieben/erfunden, alle Felder stammen 1:1 aus dem
+        // bereits vorhandenen, echten active_trip_state-Eintrag.
+        let session = await FIDB.get("fishing_session", rec.session_id);
+        if (!session) {
+          session = { session_id: rec.session_id, angler: "Nils", start_time: rec.start_time,
+            species_target: rec.species_target, water_id: rec.water_id, spot_id: rec.spot_id || null,
+            shore_or_boat: rec.shore_or_boat || null, result_fish_count: 0, result_contact_count: 0,
+            status: "in_progress", created_at: rec.start_time || FIDB.nowIso(),
+            data_origin: "prospective_app_own",
+            legacy_recovered: true, // Transparenzmarker (v28 Abschnitt 3) — beeinflusst kein Scoring
+          };
+          await FIDB.put("fishing_session", session);
+          if (window.FISync) FISync.enqueue("fishing_session", session.session_id);
+        }
+        STATE.trip.session = { ...session };
         STATE.trip.active = true;
         STATE.trip.track = trackDoc?.points ? trackDoc.points.slice() : [];
         STATE.trip.gpsMode = "off";
@@ -1016,9 +1210,32 @@ async function renderTripRecoveryScreen() {
         renderTripScreen(root);
       } }, "▶ Trip fortsetzen"),
       UI.el("button", { class: "btn btn-secondary", onclick: async () => {
+        // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 5): "Verwerfen" darf einen echten,
+        // gestarteten Trip nicht mehr spurenlos verschwinden lassen. Die persistente
+        // fishing_session (oder — bei einem v27-Alt-Eintrag ohne eigene Session — eine daraus jetzt
+        // erstmals abgeleitete, ausschliesslich aus bereits vorhandenen echten Feldern bestehende
+        // Session) bleibt bestehen und bekommt status "abandoned". KEIN Loeschen von trip_track
+        // mehr (GPS-Route bleibt als session-verknuepftes Datum erhalten) — nur der
+        // active_trip_state-Zeiger (reiner Recovery-Hinweis, keine eigenen Nutzdaten) wird geleert.
+        const abandonedAt = FIDB.nowIso();
+        let session = await FIDB.get("fishing_session", rec.session_id);
+        if (session) {
+          session.status = "abandoned";
+          session.abandoned_at = abandonedAt;
+        } else {
+          session = { session_id: rec.session_id, angler: "Nils", start_time: rec.start_time,
+            species_target: rec.species_target, water_id: rec.water_id, spot_id: rec.spot_id || null,
+            shore_or_boat: rec.shore_or_boat || null, result_fish_count: 0, result_contact_count: 0,
+            status: "abandoned", abandoned_at: abandonedAt, outcome_known: false,
+            created_at: rec.start_time || abandonedAt, data_origin: "prospective_app_own",
+            legacy_recovered: true,
+          };
+        }
+        await FIDB.put("fishing_session", session);
+        if (window.FISync) FISync.enqueue("fishing_session", session.session_id);
         await clearActiveTripState();
-        try { await FIDB.del("trip_track", rec.session_id); } catch (e) { console.warn("Verworfener Trip-Track konnte nicht geloescht werden:", e); }
         STATE.pendingRecovery = null;
+        UI.toast("Trip als verworfen markiert. Bereits erfasste Daten (Route, Start) bleiben erhalten — sichtbar unter Insights → Data Integrity (?hidebug=1).", "success");
         renderView();
       } }, "✕ Verwerfen"),
     ]),
@@ -1123,18 +1340,40 @@ function renderTripScreen(root) {
       UI.el("label", {}, "Gewässer"), tripWaterSel,
       UI.el("label", {}, "Spot (optional)"), tripSpotSel,
       UI.el("button", { class: "btn btn-primary", style: "margin-top:12px;", onclick: async () => {
+        // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 4): kein stilles Ueberschreiben einer
+        // bereits laufenden Session. Der Router (init()/renderView()) faengt den Normalfall zwar
+        // bereits ab (Recovery-Screen VOR jeder anderen Ansicht, siehe STATE.pendingRecovery), dieser
+        // defensive Zweit-Check schuetzt zusaetzlich vor dem theoretischen Randfall einer zwischen
+        // App-Start und Klick veraenderten active_trip_state (z.B. zweiter Tab/Fenster).
+        const staleActive = await FIDB.get("active_trip_state", "current");
+        if (staleActive && (!STATE.trip.session || staleActive.session_id !== STATE.trip.session.session_id)) {
+          STATE.pendingRecovery = staleActive;
+          UI.toast("Es läuft bereits ein anderer Trip — bitte zuerst fortsetzen oder verwerfen.", "error");
+          renderView();
+          return;
+        }
         // Reihenfolge bewusst: zuerst der zuletzt via change-Event festgehaltene Wert, DANN erst
         // .value als Fallback (deckt den Fall ab, dass der Nutzer den Default nie angefasst hat und
         // daher nie ein change-Event feuerte), zuletzt STATE/null als letzter Fallback.
         STATE.trip.active = true;
-        STATE.trip.session = { session_id: FIDB.newId("sess"), angler: "Nils", start_time: new Date().toISOString(),
+        const nowIso = new Date().toISOString();
+        STATE.trip.session = { session_id: FIDB.newId("sess"), angler: "Nils", start_time: nowIso,
           species_target: chosenSpecies || tripSpeciesSel.value || STATE.species,
           water_id: chosenWater || tripWaterSel.value || STATE.water,
           spot_id: (chosenSpot !== null ? chosenSpot : tripSpotSel.value) || null,
-          shore_or_boat: null, result_fish_count: 0, result_contact_count: 0 };
+          shore_or_boat: null, result_fish_count: 0, result_contact_count: 0,
+          // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 2): fishing_session existiert jetzt SOFORT
+          // bei Trip-Start, nicht erst bei "Trip beenden" — status durchlaeuft
+          // in_progress -> completed (finalizeTripWithOutcome) bzw. -> abandoned (Verwerfen, siehe
+          // renderTripRecoveryScreen). created_at bleibt ab hier fuer die gesamte Lebensdauer der
+          // Session unveraendert (Erstzeitpunkt), finalizeTripWithOutcome darf ihn nie ueberschreiben.
+          status: "in_progress", created_at: nowIso, data_origin: "prospective_app_own" };
         STATE.trip.track = [];
-        // PHASE 6A: Trip-Kontext + (leerer) GPS-Track sofort persistieren, damit ein Reload direkt
-        // nach dem Start nichts verliert (Auftrag Punkt 2/3).
+        // PHASE 6A + v28: fishing_session (jetzt bereits in_progress) UND Trip-Kontext + (leerer)
+        // GPS-Track sofort persistieren, damit ein Reload direkt nach dem Start nichts verliert
+        // (Auftrag Punkt 2/3, v28 Abschnitt 2/6 sinngemaess auch fuer Trips).
+        await FIDB.put("fishing_session", STATE.trip.session);
+        if (window.FISync) FISync.enqueue("fishing_session", STATE.trip.session.session_id);
         await persistActiveTripState();
         await persistTripTrack(STATE.trip.session.session_id, []);
         renderTripScreen(root);
@@ -1266,7 +1505,15 @@ async function finalizeTripWithOutcome(root, caught, count) {
   s.outcome = caught ? "catch" : "no_catch";
   s.outcome_known = true;
   s.source_quality = "A_own_verified";
-  s.created_at = FIDB.nowIso();
+  // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 2): s.created_at ist der ECHTE Erstzeitpunkt der
+  // Session (seit Trip-Start gesetzt, siehe renderTripScreen) und darf beim Beenden NICHT mehr
+  // ueberschrieben werden — das UPDATE derselben, bereits seit Trip-Start existierenden
+  // fishing_session (gleiche session_id, siehe FIDB.put weiter unten) ist der ganze Punkt von
+  // Abschnitt 2 ("Trip-Ende aktualisiert, erzeugt KEINE zweite Session"). Vorherige Zeile
+  // "s.created_at = FIDB.nowIso()" haette bei jedem alten Trip diesen Ursprungszeitpunkt verloren.
+  if (!s.created_at) s.created_at = FIDB.nowIso(); // nur Fallback fuer sehr alte, vor v28 gestartete Trips
+  s.status = "completed";
+  s.completed_at = FIDB.nowIso();
   s.species_specific = {};
   // PHASE 6A (Data Safety Quick Fix, 22.08.2026): Datenherkunft markieren (Auftrag Punkt 9) — ein
   // ueber diesen Trip-Flow abgeschlossener Trip ist per Definition eine eigene, prospektive
@@ -1744,7 +1991,13 @@ async function viewGewaesser() {
     if (wSpots.length) {
       const list = UI.el("div", { style: "margin-top:10px;" });
       wSpots.forEach((s) => list.appendChild(UI.el("div", { class: "row", style: "padding:5px 0;border-bottom:1px solid var(--panel-border);" }, [
-        s.name, UI.el("span", { class: "chip" }, s.fangbuch_n >= 10 ? `n=${s.fangbuch_n}` : "wenig Daten"),
+        s.name,
+        // v28 (Auftrag Teil B, Abschnitt 15, geklaerte Produktentscheidung): fangbuch_n === null
+        // (die 29 Master-Spots, siehe seed-data.js master29Spots()) heisst ehrlich "keine eigenen
+        // historischen Daten fuer DIESEN Punkt" — bewusst UNTERSCHIEDEN von "wenig Daten" (ein
+        // Legacy-Spot mit z.B. n=5 hat sehr wohl ein paar eigene historische Faenge, nur nicht genug
+        // fuer eine belastbare Aussage). Keine erfundene historische Evidenz (Abschnitt 15).
+        UI.el("span", { class: "chip" }, s.fangbuch_n === null || s.fangbuch_n === undefined ? "Keine eigenen historischen Daten" : (s.fangbuch_n >= 10 ? `n=${s.fangbuch_n}` : "wenig Daten")),
       ])));
       panel.appendChild(list);
     }
@@ -2094,6 +2347,54 @@ async function renderCloudBackupPanel(slot) {
   ]));
 }
 
+// v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 8): zentrale Status-Ableitung fuer fishing_session.
+// Ein fehlendes status-Feld (jede vor v28 abgeschlossene Session, Trip ODER Quick-Log) gilt als
+// implizit "completed" — vor v28 wurde eine fishing_session AUSSCHLIESSLICH beim erfolgreichen
+// Abschluss angelegt (siehe Auftrag Abschnitt 1/Diagnose), ein Legacy-Datensatz OHNE status-Feld war
+// also strukturell immer ein vollstaendiger Trip/Fang, nie ein "laufender"/"verworfener" Zustand.
+function tripStatus(s) { return (s && s.status) || "completed"; }
+
+// v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 9) — siehe Aufrufstelle in viewInsights(). Rein
+// lesend, keine Mutation an irgendeinem Store. Zahlen bewusst nicht limitiert auf "die letzten N" bei
+// den Kernlisten (Auftrag: vollstaendige Diagnose), aber defensiv mit sort() + einer harten Obergrenze
+// pro Tabelle, damit ein Geraet mit sehr vielen Datensaetzen die Ansicht nicht unbrauchbar macht.
+async function renderDataIntegrityDebugPanel(root, sessions, catches, abandonedSessions) {
+  const [activeTripState, tripTracks] = await Promise.all([
+    FIDB.get("active_trip_state", "current"), FIDB.getAll("trip_track"),
+  ]);
+  const sessionIds = new Set(sessions.map((s) => s.session_id));
+  const orphanCatches = catches.filter((c) => c.session_id && !sessionIds.has(c.session_id));
+  const trackBySession = new Map(tripTracks.map((t) => [t.session_id, t]));
+  const orphanTracks = tripTracks.filter((t) => !sessionIds.has(t.session_id));
+
+  const sortedSessions = [...sessions].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  const MAX_ROWS = 40;
+
+  const wrap = UI.el("div", { class: "panel", style: "margin-top:14px;" }, [
+    UI.el("div", { class: "panel-label" }, "🩺 Data Integrity (Debug, ?hidebug=1 — nur lesend, Auftrag v28 Abschnitt 9)"),
+    UI.el("div", { class: "subtext" }, `fishing_session gesamt: ${sessions.length} (completed: ${sessions.length - abandonedSessions.length - sessions.filter((s) => tripStatus(s) === "in_progress").length}, in_progress: ${sessions.filter((s) => tripStatus(s) === "in_progress").length}, abandoned: ${abandonedSessions.length}) · catch_event gesamt: ${catches.length} · orphan catch_events: ${orphanCatches.length} · trip_track gesamt: ${tripTracks.length} · orphan trip_track: ${orphanTracks.length}`),
+    UI.el("div", { class: "subtext" }, activeTripState
+      ? `active_trip_state (Singleton): session_id=${activeTripState.session_id}, water=${activeTripState.water_id}, spot=${activeTripState.spot_id || "–"}, start=${activeTripState.start_time} → fishing_session vorhanden: ${sessionIds.has(activeTripState.session_id) ? "ja" : "NEIN (v27-Alt-Eintrag, wird beim Fortsetzen/Verwerfen idempotent nachgezogen)"}`
+      : "active_trip_state (Singleton): kein laufender Trip."),
+  ]);
+
+  const table = UI.el("div", { style: "margin-top:8px;font-family:monospace;font-size:11px;white-space:pre-wrap;max-height:260px;overflow:auto;border:1px solid var(--panel-border);padding:6px;" });
+  table.appendChild(document.createTextNode(
+    "fishing_session (neueste zuerst" + (sortedSessions.length > MAX_ROWS ? `, ${MAX_ROWS} von ${sortedSessions.length}` : "") + "):\n" +
+    sortedSessions.slice(0, MAX_ROWS).map((s) => {
+      const track = trackBySession.get(s.session_id);
+      return `  ${s.session_id} | status=${tripStatus(s)} | start=${s.start_time || s.date || "?"} | end=${s.end_time || "–"} | species=${s.species_target || "?"} | water=${s.water_id || "?"} | spot=${s.spot_id || "–"} | fish=${s.result_fish_count ?? "?"} | track=${track ? track.points.length + "pt" : "–"}${s.legacy_recovered ? " | legacy_recovered" : ""}`;
+    }).join("\n") +
+    "\n\ncatch_event (neueste zuerst" + (catches.length > MAX_ROWS ? `, ${MAX_ROWS} von ${catches.length}` : "") + "):\n" +
+    [...catches].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, MAX_ROWS).map((c) =>
+      `  ${c.catch_id} | session_id=${c.session_id} | species=${c.species} | created_at=${c.created_at}${!sessionIds.has(c.session_id) ? " | ⚠ ORPHAN" : ""}`
+    ).join("\n") +
+    (orphanTracks.length ? "\n\n⚠ orphan trip_track (session_id ohne fishing_session):\n" + orphanTracks.map((t) => `  ${t.session_id} | ${t.points.length}pt`).join("\n") : "")
+  ));
+  wrap.appendChild(table);
+  root.appendChild(wrap);
+}
+
 async function viewInsights() {
   const root = UI.el("div", {});
   root.appendChild(UI.el("h1", {}, "🧠 Insights"));
@@ -2101,12 +2402,22 @@ async function viewInsights() {
   const [sessions, catches, reports, observations] = await Promise.all([
     FIDB.getAll("fishing_session"), FIDB.getAll("catch_event"), FIDB.getAll("intelligence_report"), FIDB.getAll("observation"),
   ]);
+  // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 8): "Eigene Trips" zaehlt jetzt ausschliesslich
+  // ABGESCHLOSSENE Trips (status "completed"/Legacy-Fallback) — ein laufender Trip (in_progress) ist
+  // kein abgeschlossener Datenpunkt und wird SEPARAT ausgewiesen statt den Hauptzaehler zu verfaelschen;
+  // ein verworfener Trip (abandoned) bleibt in der Datenbank erhalten (Abschnitt 5), zaehlt aber
+  // bewusst NICHT als "eigener Trip" (sichtbar nur im Data-Integrity-Debug-Panel unten,
+  // ?hidebug=1, Abschnitt 9) — kein stiller Datenverlust, aber auch keine verfaelschte Statistik.
+  const completedSessions = sessions.filter((s) => tripStatus(s) === "completed");
+  const inProgressSessions = sessions.filter((s) => tripStatus(s) === "in_progress");
+  const abandonedSessions = sessions.filter((s) => tripStatus(s) === "abandoned");
   root.appendChild(UI.el("div", { class: "panel" }, [
     UI.el("div", { class: "panel-label" }, "Datenbestand (Provenance bleibt getrennt, Abschnitt 38)"),
     UI.el("div", { class: "quality-grid" }, [
-      UI.el("div", {}, `Eigene Trips: ${sessions.length}`), UI.el("div", {}, `Eigene Fänge: ${catches.length}`),
+      UI.el("div", {}, `Eigene Trips: ${completedSessions.length}`), UI.el("div", {}, `Eigene Fänge: ${catches.length}`),
       UI.el("div", {}, `Intelligence-Meldungen: ${reports.length}`), UI.el("div", {}, `Beobachtungen: ${observations.length}`),
     ]),
+    inProgressSessions.length ? UI.el("div", { class: "subtext", style: "margin-top:6px;" }, `🔄 Laufende Trips: ${inProgressSessions.length}`) : null,
   ]));
 
   // PHASE 6A (Data Safety Quick Fix): manuelles Backup/Restore — bewusst hier in "Insights" statt
@@ -2195,6 +2506,13 @@ async function viewInsights() {
   // Backup/Restore/Cloud-Sicherung (derselbe Datenverwaltungs-/Datensicherheits-Bereich, Auftrag
   // Abschnitt 3), keine neue Bottom-Nav-Ansicht.
   renderTestDataCleanupSection(root);
+
+  // v28 DATA INTEGRITY (Auftrag Teil A, Abschnitt 9): rein LESENDES Debug-Panel unter ?hidebug=1 —
+  // KEINE Loesch-/Reparaturfunktion, ausschliesslich Diagnose. Zeigt fishing_session (id/status/
+  // start/end/species/water/spot), catch_event (id/session_id/species/timestamp), orphan
+  // catch_events (session_id ohne passende fishing_session), den aktuellen active_trip_state
+  // (Singleton) sowie die trip_track-Beziehung (inkl. verwaister trip_track-Eintraege).
+  if (HI_DEBUG) await renderDataIntegrityDebugPanel(root, sessions, catches, abandonedSessions);
 
   const tenDaysAgo = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
   const recent = reports.filter((r) => r.catch_date && r.catch_date >= tenDaysAgo);
