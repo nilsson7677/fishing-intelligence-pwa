@@ -30,7 +30,7 @@ const HI_DEBUG = new URLSearchParams(window.location.search).has("hidebug");
 // nie erreichbar. Seit Runde 4 daher IMMER sichtbar (siehe renderTripScreen()). Bei jeder
 // inhaltlichen Aenderung an renderTripScreen() MUSS dieser String zusammen mit sw.js CACHE_NAME
 // angehoben werden.
-const APP_BUILD = "fishing-intelligence-v1-reliable-cloud-backup-v29.3-2026-09-05";
+const APP_BUILD = "fishing-intelligence-v1-reliable-cloud-backup-v29.4-2026-09-05";
 
 // v29.1 (Auftrag "VERSION LABEL MICRO-HOTFIX", reines UI-Hotfix): das dezente, dauerhaft sichtbare
 // Versions-Label auf dem Co-Pilot-Hauptbildschirm (siehe viewCoPilot()) wird aus APP_BUILD

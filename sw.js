@@ -5,7 +5,26 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v29-3"; // v29.3: SUPABASE AUTH 401 HOTFIX (05.09.2026). Live
+const CACHE_NAME = "fishintel-shell-v29-4"; // v29.4: SUPABASE AUTH HEADER SPLIT (05.09.2026). Der
+// v29.3-Fix (global.headers.Authorization="" auf dem EINEN Hauptclient) reparierte signInWithOtp(),
+// vergiftete dabei aber versehentlich auch alle authentifizierten PostgREST-Aufrufe desselben
+// Clients (POST /rest/v1/environmental_snapshot u.a. -> 401, auth_user:null trotz aktiver Session) —
+// Root Cause: supabase-js injiziert den echten Session-Token fuer REST-Aufrufe nur dann dynamisch,
+// wenn der Request noch KEINEN Authorization-Header traegt (fetchWithAuth()/_getAccessToken() in
+// SupabaseClient.ts); der global gesetzte, leere Header war aber bereits "vorhanden" und blockierte
+// diese Injektion fuer JEDEN Aufruf des Clients, nicht nur fuer signInWithOtp(). Siehe
+// claude/PHASE_SUPABASE_AUTH_HEADER_SPLIT_V29_4_REPORT.md fuer die vollstaendige Analyse. FIX:
+// der Header-Override wird ab v29.4 NICHT MEHR auf dem Hauptclient (js/sync.js: getClient(), weiter
+// zustaendig fuer Session-Verwaltung UND alle PostgREST-Aufrufe) gesetzt, sondern ausschliesslich auf
+// einem zweiten, bewusst zustandslosen Hilfsclient (_getAuthOnlyClient()), der NUR fuer
+// signInWithMagicLink()/signInWithOtp() verwendet wird. Der Hauptclient ist damit wieder "sauber"
+// (keine global.headers) wie in v29.2 — PostgREST erhaelt pro Request wieder korrekt den echten
+// Session-Access-Token. EINZIGE geaenderte Datei: js/sync.js (getClient() bereinigt, neuer
+// _getAuthOnlyClient(), signInWithMagicLink() nutzt diesen). KEINE Aenderung an RLS/Policies/
+// Supabase-Schema, DB_VERSION (bleibt 8), IndexedDB, Sync-Queue-/Restore-/Tombstone-Logik,
+// Champion/Challenger/HI-2B/HI-2C/WHAT/Fangindex/Spot-Logik/Datenmodell. Publishable Key unveraendert,
+// kein Service-Role-/Secret-Key im Browser.
+// v29.3 (davor): SUPABASE AUTH 401 HOTFIX (05.09.2026). Live
 // bestaetigt: signInWithOtp() schlug mit 401 UNAUTHORIZED_INVALID_API_KEY fehl, weil supabase-js den
 // Auth-Teilclient IMMER mit "Authorization: Bearer <apikey>" konstruiert (SDK-Standardverhalten) — der
 // neue, nicht-JWT-foermige sb_publishable_-Key wird dort als JWT geparst und abgelehnt (siehe

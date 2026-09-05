@@ -81,30 +81,76 @@ function loadSupabaseSdk() {
 // davon unberuehrt bleiben (siehe Bericht Abschnitt B). Der publishable Key wird laut offizieller
 // Supabase-Migrationsanleitung ohnehin ausschliesslich ueber den apikey-Header uebertragen — der
 // zusaetzliche, von supabase-js selbst gesetzte Authorization-Header ist fuer einen rein anonymen
-// Aufruf (kein eingeloggter Nutzer) weder noetig noch gewollt. global.headers.Authorization = ""
-// ueberschreibt exakt diesen einen Default-Header (Override-Reihenfolge in supabase-js:
-// { ...authHeaders, ...global.headers } — global.headers gewinnt) und wurde vom Nutzer per echtem
-// Live-Request gegen das Produktions-Supabase-Projekt bestaetigt (signInWithOtp() liefert error:null,
-// Magic-Link-Mail kommt an). Sobald eine echte Nutzer-Session existiert, verwaltet supabase-js den
-// Authorization-Header fuer authentifizierte Requests ohnehin eigenstaendig ueber die Session-Logik —
-// dieser statische Override betrifft nur den initialen, anonymen Zustand des Auth-Teilclients.
+// Aufruf (kein eingeloggter Nutzer) weder noetig noch gewollt.
+//
+// v29.4 (Auftrag "SUPABASE AUTH HEADER SPLIT", 05.09.2026) — WICHTIGE KORREKTUR der v29.3-Umsetzung:
+// Der Override "global.headers.Authorization = ''" wurde in v29.3 auf DIESEN (Haupt-)Client gesetzt,
+// der ueberall im Modul verwendet wird — auch fuer alle PostgREST-Aufrufe (.from(...) in flushQueue/
+// verifyCloudCompleteness/fetchCloudRestoreData). Root-Cause-Analyse im supabase-js-Quellcode ergab
+// (siehe claude/PHASE_SUPABASE_AUTH_HEADER_SPLIT_V29_4_REPORT.md): supabase-js injiziert fuer
+// PostgREST-Aufrufe den aktuellen Session-Access-Token dynamisch PRO REQUEST
+// (SupabaseClient.ts: fetchWithAuth()/_getAccessToken()) — ABER NUR, wenn der Request noch KEINEN
+// Authorization-Header traegt ("if (!headers.has('Authorization')) { ... }"). Weil Auth- und
+// REST-Teilclient dieselbe headers-Objektreferenz (this.headers) erhalten, "vergiftete" der global
+// gesetzte, leere Authorization-Header versehentlich auch jeden PostgREST-Request: die dynamische
+// Bearer-Token-Injektion wurde uebersprungen (Header war ja bereits "vorhanden", nur eben leer), und
+// jeder authentifizierte Cloud-Sync-Request ging mit einer LEEREN Authorization-Zeile raus ->
+// 401, auth_user:null im Supabase-Gateway-Log, obwohl der Nutzer nachweislich eingeloggt war.
+//
+// FIX: der Override wird NICHT MEHR auf diesem Hauptclient gesetzt (der bleibt ab v29.4 wieder
+// "sauber", exakt wie in v29.2 — keine global.headers). Dieser Hauptclient bleibt weiterhin
+// zustaendig fuer Session-Verwaltung (getSession/onAuthStateChange/Refresh/detectSessionInUrl fuer
+// den Magic-Link-Rueckweg) UND fuer ALLE PostgREST-Aufrufe — beides funktioniert jetzt wieder korrekt,
+// weil sein this.headers keinen vorbelegten Authorization-Key mehr enthaelt und fetchWithAuth() daher
+// bei jedem REST-Request wieder frisch den echten Session-Token (oder mangels Session den
+// publishable Key als harmlosen anon-Fallback) einsetzt. Fuer authentifizierte GoTrue-Aufrufe
+// (z.B. getUser(), das laut Live-Test bereits in v29.3 200 lieferte) ist dieser Header ohnehin
+// irrelevant: auth-js setzt fuer JEDEN Aufruf mit vorhandener Session explizit "Authorization:
+// Bearer <session.access_token>" ueber einen eigenen jwt-Parameter, der den statischen
+// Default-Header unabhaengig vom Client ueberschreibt (siehe Bericht Abschnitt A).
+// Der EINZIGE Aufruf, der den Override tatsaechlich braucht, ist signInWithOtp() OHNE vorhandene
+// Session (kein jwt-Parameter verfuegbar) — dafuer gibt es ab v29.4 einen zweiten, bewusst
+// zustandslosen Hilfsclient (siehe _getAuthOnlyClient() unten), der NUR fuer diesen einen
+// Aufruf verwendet wird und sonst nirgends im Modul referenziert wird.
 function getClient() {
   if (_client) return _client;
   if (typeof window === "undefined" || !window.supabase || !window.supabase.createClient) return null;
   try {
     _client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
-      global: { headers: { Authorization: "" } },
     });
   } catch (e) { _client = null; }
   return _client;
 }
 
+// v29.4: separater, bewusst zustandsloser Hilfsclient AUSSCHLIESSLICH fuer signInWithMagicLink()
+// (intern signInWithOtp()) — der einzige Aufruf im Modul, der ohne vorhandene Session auskommen muss
+// und daher den v29.3-Header-Fix tatsaechlich braucht (siehe Kommentar oben bei getClient()).
+// persistSession/autoRefreshToken/detectSessionInUrl bewusst alle false: dieser Client haelt selbst
+// NIE eine Session und ist am App-Storage komplett unbeteiligt — er dient einzig dazu, den
+// OTP-Request mit korrektem (leerem statt kaputt-vorbelegtem) Authorization-Header abzusetzen. Die
+// eigentliche Session entsteht wie gehabt im Hauptclient (getClient()), sobald der Nutzer den
+// Magic-Link oeffnet (detectSessionInUrl dort unveraendert aktiv).
+let _authOnlyClient = null;
+function _getAuthOnlyClient() {
+  if (_authOnlyClient) return _authOnlyClient;
+  if (typeof window === "undefined" || !window.supabase || !window.supabase.createClient) return null;
+  try {
+    _authOnlyClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      global: { headers: { Authorization: "" } },
+    });
+  } catch (e) { _authOnlyClient = null; }
+  return _authOnlyClient;
+}
+
 // Erlaubt Tests, einen Fake-Client zu injizieren, ohne echtes Netz/echtes SDK zu brauchen — das ist
 // die Grundlage dafuer, Queue/Retry/Idempotenz/Local-First deterministisch zu testen (siehe
-// test/phase6b_cloud_backup_test.js). _reset() gibt Tests zusaetzlich einen sauberen Ausgangspunkt.
+// test/phase6b_cloud_backup_test.js). Betrifft ausschliesslich den Hauptclient (_client) — kein
+// bestehender Test uebt signInWithMagicLink()/_authOnlyClient aus. _reset() gibt Tests zusaetzlich
+// einen sauberen Ausgangspunkt und loescht ab v29.4 auch einen evtl. vorhandenen _authOnlyClient.
 function _setClientForTesting(client) { _client = client; }
-function _reset() { _client = null; _sdkLoadPromise = null; }
+function _reset() { _client = null; _authOnlyClient = null; _sdkLoadPromise = null; }
 
 async function getSession() {
   const client = getClient();
@@ -118,9 +164,13 @@ async function getSession() {
 
 async function isLoggedIn() { return (await getSession()) !== null; }
 
+// v29.4: verwendet bewusst _getAuthOnlyClient() statt getClient() — siehe Kommentar bei
+// _getAuthOnlyClient() oben. Der Hauptclient (getClient()) darf hierfuer NICHT verwendet werden,
+// sonst wuerde der fuer diesen einen Aufruf noetige Authorization-Override wieder auf die
+// PostgREST-Aufrufe desselben Clients durchschlagen (exakt der v29.3-Regressionsfehler).
 async function signInWithMagicLink(email) {
-  if (!getClient()) await loadSupabaseSdk().catch(() => {}); // SDK-Ladeversuch ueberspringen, wenn schon ein Client vorhanden ist (z.B. injizierter Test-Client)
-  const client = getClient();
+  if (!_getAuthOnlyClient()) await loadSupabaseSdk().catch(() => {}); // SDK-Ladeversuch ueberspringen, wenn schon ein Client vorhanden ist (z.B. injizierter Test-Client)
+  const client = _getAuthOnlyClient();
   if (!client) return { ok: false, error: "Cloud-Sicherung ist gerade nicht verfügbar (SDK nicht geladen, evtl. kein Netz). Alle lokalen Funktionen funktionieren trotzdem uneingeschränkt weiter." };
   try {
     const { error } = await client.auth.signInWithOtp({
