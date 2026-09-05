@@ -17,7 +17,7 @@
 // gecacht, weil sie ohnehin nur mit Netz sinnvoll ist (siehe sw.js-Kommentar).
 
 const SUPABASE_URL = "https://vqqqemrodbjsypvxxhry.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_xeRdY-Cd2gtDn9mluNHkgA_F_GXNAd"; // publishable/anon Key -- durch RLS abgesichert, bewusst oeffentlich im Client, siehe Begleitdokument Abschnitt 5. NIEMALS den service_role Key hier eintragen.
+const SUPABASE_ANON_KEY = "sb_publishable_xeRdY-Cd2gtDn9mluNHkgA_F_GXNAdH"; // publishable/anon Key -- durch RLS abgesichert, bewusst oeffentlich im Client, siehe Begleitdokument Abschnitt 5. NIEMALS den service_role Key hier eintragen.
 const SUPABASE_SDK_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js";
 
 // Store->Tabellenname ist 1:1 identisch (siehe supabase_setup.sql). Nur diese 8 Stores werden
@@ -70,12 +70,31 @@ function loadSupabaseSdk() {
   return _sdkLoadPromise;
 }
 
+// v29.3 (Auftrag "SUPABASE AUTH 401 DIAGNOSTIC + MINIMAL HOTFIX", live bestaetigt 05.09.2026):
+// supabase-js baut den Auth-Teilclient (GoTrue) IMMER mit einem Default-Header
+// "Authorization: Bearer <supabaseKey>" (verifiziert im supabase-js-Quellcode,
+// SupabaseClient.ts:_initSupabaseAuthClient, siehe claude/PHASE_SUPABASE_AUTH_401_DIAGNOSTIC_V29_3_REPORT.md
+// Abschnitt A). Das war mit dem alten, JWT-foermigen anon-Key unproblematisch, bricht aber mit dem
+// neuen, NICHT-JWT-foermigen sb_publishable_-Key: die Plattform versucht, den Authorization-Wert als
+// JWT zu parsen, und lehnt sicherheitsrelevante POST-Auth-Routen (z.B. /auth/v1/otp) mit
+// 401 UNAUTHORIZED_INVALID_API_KEY ab, waehrend rein oeffentliche GET-Routen (z.B. /auth/v1/settings)
+// davon unberuehrt bleiben (siehe Bericht Abschnitt B). Der publishable Key wird laut offizieller
+// Supabase-Migrationsanleitung ohnehin ausschliesslich ueber den apikey-Header uebertragen — der
+// zusaetzliche, von supabase-js selbst gesetzte Authorization-Header ist fuer einen rein anonymen
+// Aufruf (kein eingeloggter Nutzer) weder noetig noch gewollt. global.headers.Authorization = ""
+// ueberschreibt exakt diesen einen Default-Header (Override-Reihenfolge in supabase-js:
+// { ...authHeaders, ...global.headers } — global.headers gewinnt) und wurde vom Nutzer per echtem
+// Live-Request gegen das Produktions-Supabase-Projekt bestaetigt (signInWithOtp() liefert error:null,
+// Magic-Link-Mail kommt an). Sobald eine echte Nutzer-Session existiert, verwaltet supabase-js den
+// Authorization-Header fuer authentifizierte Requests ohnehin eigenstaendig ueber die Session-Logik —
+// dieser statische Override betrifft nur den initialen, anonymen Zustand des Auth-Teilclients.
 function getClient() {
   if (_client) return _client;
   if (typeof window === "undefined" || !window.supabase || !window.supabase.createClient) return null;
   try {
     _client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+      global: { headers: { Authorization: "" } },
     });
   } catch (e) { _client = null; }
   return _client;

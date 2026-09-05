@@ -5,7 +5,23 @@
 // fetch() und muessen bei Ausfall ehrlich fehlschlagen (Retry-/Pending-Prinzip aus Sprint 1
 // bleibt erhalten, siehe js/enrichment.js).
 
-const CACHE_NAME = "fishintel-shell-v29-2"; // v29.2: CLOUD-KEY-CACHE-MICROHOTFIX (04.09.2026).
+const CACHE_NAME = "fishintel-shell-v29-3"; // v29.3: SUPABASE AUTH 401 HOTFIX (05.09.2026). Live
+// bestaetigt: signInWithOtp() schlug mit 401 UNAUTHORIZED_INVALID_API_KEY fehl, weil supabase-js den
+// Auth-Teilclient IMMER mit "Authorization: Bearer <apikey>" konstruiert (SDK-Standardverhalten) — der
+// neue, nicht-JWT-foermige sb_publishable_-Key wird dort als JWT geparst und abgelehnt (siehe
+// claude/PHASE_SUPABASE_AUTH_401_DIAGNOSTIC_V29_3_REPORT.md fuer die vollstaendige Root-Cause-Analyse
+// inkl. supabase-js-Quellcode-Zitat). EINZIGE Aenderung dieses Hotfixes: js/sync.js, getClient() —
+// ein zusaetzlicher createClient()-Parameter "global: { headers: { Authorization: "" } }", der genau
+// diesen einen Default-Header fuer den anonymen (nicht eingeloggten) Zustand ueberschreibt. Vom Nutzer
+// per echtem Live-Request gegen das Produktions-Supabase-Projekt bestaetigt (error:null, Magic-Link-
+// Mail kam an) — dies ist also KEIN spekulativer Fix. CACHE_NAME-Anhebung erzwingt wie gewohnt einen
+// sauberen Neuabruf aller Shell-Dateien inkl. der korrigierten js/sync.js. APP_BUILD in js/app.js
+// parallel auf v29.3 angehoben — Versions-Label zeigt automatisch "Fishing Intelligence · v29.3".
+// KEINE weitere Aenderung: DB_VERSION bleibt 8, keine IndexedDB-/Supabase-Schema-/Migrations-
+// Aenderung, keine Aenderung an Sync-Queue/Verifizierung/Restore/Tombstone-Logik (nur der eine
+// zusaetzliche Client-Header, keine Logikaenderung), keine Aenderung an Champion/Challenger/HI-2B/
+// HI-2C/WHAT/Fangindex/Spot-Logik/Datenmodell.
+// v29.2 (davor): CLOUD-KEY-CACHE-MICROHOTFIX (04.09.2026).
 // Reiner Cache-Bust + Versionsanhebung, KEINE Logik-/Modell-/DB-/Schema-Aenderung: js/sync.js wurde
 // LOKAL bereits korrigiert (SUPABASE_ANON_KEY war um genau EIN Zeichen verkuerzt — "Invalid API key"
 // serverseitig) — diese Korrektur war aber vom Nutzer bereits vorher vorgenommen worden und wirkte
